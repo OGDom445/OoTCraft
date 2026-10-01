@@ -260,7 +260,7 @@ public class OotMcClient implements ClientModInitializer {
     }
 
     private static net.minecraft.world.phys.Vec3 lastSafe;
-    private static long lastVoidCatch = 0;
+    private static long lastVoidCatch = 0, lastVoidOut = 0;
 
     /** Never fall into the void under Hyrule: anything below its lowest ground goes back to where Steve last stood. */
     private static void catchVoidFall(Minecraft mc) {
@@ -277,11 +277,12 @@ public class OotMcClient implements ClientModInitializer {
             if (lastSafe != null && now - lastVoidCatch > 10000) {
                 p.setPos(lastSafe.x, lastSafe.y + 0.1, lastSafe.z);
                 OotMc.LOGGER.info("[OoTCraft] caught a fall into the void; back to {}", lastSafe);
-            } else {
+            } else if (now - lastVoidOut > 6000) {
                 // Twice in a row (where Steve stood is gone too): Zelda's own void-out, back to the entrance
                 Bridge bridge = Bridge.get();
                 if (bridge != null) bridge.pushEvent(Bridge.EV_VOID_OUT, 0, 0, 0);
                 lastSafe = null;
+                lastVoidOut = now;
                 OotMc.LOGGER.info("[OoTCraft] fell out of the world: Zelda void-out");
             }
             lastVoidCatch = now;

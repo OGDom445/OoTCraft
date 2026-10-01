@@ -3483,10 +3483,10 @@ index 0000000..43ea6cb
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
 new file mode 100644
-index 0000000..c32bbec
+index 0000000..7a647d1
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
-@@ -0,0 +1,1219 @@
+@@ -0,0 +1,1233 @@
 +#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -4073,8 +4073,19 @@ index 0000000..c32bbec
 +    poly.dist = (s16)-(nx * a.x + ny * a.y + nz * a.z);
 +}
 +
++// Original poly flags of every level triangle we've switched off. Kept for the whole session: Ship of Harkinian
++// keeps scene collision cached, so a triangle switched off on an earlier visit is still off when you come back.
++std::unordered_map<CollisionPoly*, u16> sOrigFlags;
++
++// Was this triangle ignored by Link and actors in the original level? (Our own switching-off doesn't count.)
++bool IgnoredOriginally(CollisionPoly* p) {
++    auto it = sOrigFlags.find(p);
++    u16 flags = it != sOrigFlags.end() ? it->second : p->flags_vIA;
++    return (flags & 0x4000) != 0;
++}
++
 +bool Convertible(PlayState* play, CollisionPoly* p) {
-+    return !SurfaceType_IsIgnoredByEntities(&play->colCtx, p, BGCHECK_SCENE) &&
++    return !IgnoredOriginally(p) &&
 +           SurfaceType_GetSceneExitIndex(&play->colCtx, p, BGCHECK_SCENE) == 0 &&
 +           func_80041EA4(&play->colCtx, p, BGCHECK_SCENE) == 0; // void-outs and other special floors stay
 +}
@@ -4090,7 +4101,7 @@ index 0000000..c32bbec
 +    }
 +}
 +
-+std::set<CollisionPoly*> sDisabled; // level polys we switched off (only ours get switched back on)
++std::set<CollisionPoly*> sDisabled; // level polys switched off for the current scene
 +
 +void RebuildSolid(PlayState* play) {
 +    CollisionHeader* col = play->colCtx.colHeader;
@@ -4098,9 +4109,12 @@ index 0000000..c32bbec
 +    if (col == nullptr || col->polyList == nullptr || col->vtxList == nullptr) {
 +        return;
 +    }
-+    for (CollisionPoly* p : sDisabled) {
-+        if (p >= col->polyList && p < col->polyList + col->numPolygons) {
-+            p->flags_vIA &= ~kIgnoreAll;
++    // Switch everything back to how the level had it, then cut again
++    for (int i = 0; i < col->numPolygons; i++) {
++        CollisionPoly* p = &col->polyList[i];
++        auto orig = sOrigFlags.find(p);
++        if (orig != sOrigFlags.end()) {
++            p->flags_vIA = (p->flags_vIA & 0x1FFF) | (orig->second & ~0x1FFF);
 +        }
 +    }
 +    sDisabled.clear();
@@ -4120,6 +4134,7 @@ index 0000000..c32bbec
 +            bigRemoved++; // a big triangle can't fit inside dug blocks: don't lose it
 +            continue;
 +        }
++        sOrigFlags.emplace(p, p->flags_vIA);
 +        p->flags_vIA |= kIgnoreAll;
 +        sDisabled.insert(p);
 +        for (const Poly& poly : pieces) {
@@ -4192,7 +4207,7 @@ index 0000000..c32bbec
 +    f32 bestY = 1e30f;
 +    for (int i = 0; i < col->numPolygons; i++) {
 +        CollisionPoly* p = &col->polyList[i];
-+        if (SurfaceType_IsIgnoredByEntities(&play->colCtx, p, BGCHECK_SCENE)) {
++        if (IgnoredOriginally(p)) {
 +            continue;
 +        }
 +        f32 ny = COLPOLY_GET_NORMAL(p->normal.y);
@@ -4587,7 +4602,6 @@ index 0000000..c32bbec
 +// Scene (re)loaded: cut out everything dug here before (the blocks are already in the Minecraft world)
 +void ReplayCarves(PlayState* play) {
 +    LoadConverted();
-+    sDisabled.clear(); // new scene: its collision is fresh
 +    sPatchActor = nullptr; // the old scene's actor is gone
 +    sPieces.clear();
 +    sPieceHeader = {};
