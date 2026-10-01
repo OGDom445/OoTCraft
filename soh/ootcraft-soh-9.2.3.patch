@@ -1,0 +1,4824 @@
+diff --git a/soh/soh/ActorDB.cpp b/soh/soh/ActorDB.cpp
+index 70ea296..ae67cb3 100644
+--- a/soh/soh/ActorDB.cpp
++++ b/soh/soh/ActorDB.cpp
+@@ -1,4 +1,5 @@
+ #include "ActorDB.h"
++#include "soh/Enhancements/Minecraft/Minecraft.h"
+ 
+ #include <assert.h>
+ 
+@@ -614,6 +615,9 @@ extern "C" s16 gEnPartnerId;
+ 
+ void ActorDB::AddBuiltInCustomActors() {
+     gEnPartnerId = ActorDB::Instance->AddEntry(EnPartnerInit).entry.id;
++    Minecraft::RegisterChunkActor();
++    Minecraft::RegisterAttackerActor();
++    Minecraft::RegisterTerrainPatchActor();
+ }
+ 
+ extern "C" ActorDBEntry* ActorDB_Retrieve(const int id) {
+diff --git a/soh/soh/Enhancements/Minecraft/Bridge.h b/soh/soh/Enhancements/Minecraft/Bridge.h
+new file mode 100644
+index 0000000..fafb502
+--- /dev/null
++++ b/soh/soh/Enhancements/Minecraft/Bridge.h
+@@ -0,0 +1,276 @@
++#pragma once
++
++// OoTCraft shared-memory bridge between Ship of Harkinian and the hidden Minecraft client ("ootmc" Fabric mod).
++// Both processes map %TEMP%/oot_mc_bridge.bin. The layout must match Bridge.java exactly (little-endian).
++//
++// Authority (same split as SkyCraft):
++//   Minecraft  -> the player: position, physics, camera, inventory, health, blocks
++//   Zelda      -> the world: terrain, enemies, NPCs, cutscenes, dialogue, scene changes, progress
++
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++
++namespace Bridge {
++
++constexpr uint32_t MAGIC = 0x4D544F4F; // "OOTM"
++constexpr uint32_t VERSION = 3;
++constexpr uint32_t RING_CAP = 4096; // power of two
++constexpr uint32_t SECTION_SLOTS = 512;
++constexpr uint32_t SECTION_VOLUME = 16 * 16 * 16;
++constexpr uint32_t DYNA_MAX_TRIS = 4096;
++constexpr uint32_t MAX_ACTORS = 64;
++
++// Each OoT scene is laid out in its own region of the Minecraft "ootmc:hyrule" dimension.
++constexpr int32_t SCENE_SPACING_BLOCKS = 2048;
++constexpr int32_t ORIGIN_Y_BLOCKS = 128;
++constexpr float UNITS_PER_BLOCK = 30.0f;
++
++enum EventType : uint8_t {
++    EV_NONE = 0,
++    // Zelda -> Minecraft
++    EV_PLACE_REQUEST = 1,
++    EV_BREAK_REQUEST = 2,
++    EV_EXPLOSION = 3,
++    EV_KEY = 10,          // x = GLFW key, y = 1 press / 0 release / 2 repeat, z = GLFW mods
++    EV_MOUSE_BUTTON = 11, // x = GLFW button, y = 1 press / 0 release
++    EV_CHAR = 12,         // x = UTF-32 code point
++    EV_GIVE_ITEM = 20,    // x = OoT item id (key item obtained in Zelda)
++    EV_PLAYER_HURT = 21,  // x = damage in OoT health units (16 = one heart)
++    EV_PLAYER_HEAL = 22,  // x = health restored in OoT health units
++    EV_NUDGE = 23,        // x, y, z = Zelda pushed Link by this much (OoT units * 100): an NPC or object is in the way
++    EV_FILL = 4,          // x, y, z = block; blockId = TerrainMaterial: Hyrule terrain turned into a real block
++    // Minecraft -> Zelda
++    EV_PLAYER_DIED = 40,
++    EV_HIT_ACTOR = 41, // x = actor id, y = HitKind, z = Minecraft damage * 100
++    EV_CARVE = 42,     // x, y, z = Minecraft block: the player is mining Hyrule's own ground there
++    EV_BLOCK_BROKEN = 43, // x, y, z = Minecraft block that was mined away (dug ground spreads to its neighbours)
++    EV_BLAST = 44,        // x, y, z = explosion centre (Minecraft block), radius = blocks * 10
++    EV_USE_ZELDA_ITEM = 45, // x = OoT item id: Steve used the Minecraft version of a Zelda item
++    EV_VOID_OUT = 46,       // Steve fell out of the world: respawn at the entrance, like falling into a pit
++};
++
++enum HitKind : int32_t {
++    HIT_MELEE = 0,
++    HIT_ARROW = 1,
++    HIT_FIRE = 2,
++    HIT_EXPLOSION = 3,
++    HIT_SWEEP = 4,
++};
++
++// LinkState.flags
++enum : uint32_t {
++    LINK_FROZEN = 1 << 0,     // cutscene / transition / pause: Minecraft must not move the player
++    LINK_HANDOFF = 1 << 1,    // Link is acting on his own (door, chest, ocarina...): Minecraft follows Link
++    LINK_ZELDA_INPUT = 1 << 2, // keyboard currently belongs to Zelda (dialogue, pause menu, ocarina)
++    LINK_IN_PLAY = 1 << 3,    // a gameplay scene is loaded
++};
++
++// McState.flags
++enum : uint32_t {
++    MC_IN_HYRULE = 1 << 0,
++    MC_SCREEN_OPEN = 1 << 1, // inventory / crafting etc: cursor belongs to Minecraft
++    MC_ON_GROUND = 1 << 2,
++    MC_SWIMMING = 1 << 3,
++    MC_SNEAKING = 1 << 4,
++    MC_DEAD = 1 << 5,
++    MC_THIRD_PERSON = 1 << 6,
++};
++
++struct alignas(64) Header {
++    uint32_t magic, version, totalSize, layoutHash;
++    uint64_t ootHeartbeat; // incremented every OoT frame
++    uint64_t mcHeartbeat;  // incremented every Minecraft frame
++    uint32_t ootPid, mcPid;
++    uint8_t _pad[24];
++};
++
++struct alignas(64) LinkState { // written by Zelda
++    uint32_t seq;
++    int16_t sceneId;
++    uint8_t roomId;
++    uint8_t age; // 0 adult, 1 child
++    float x, y, z; // Link's position (OoT units)
++    int16_t yaw, pitch;
++    uint32_t flags;
++    int16_t health, healthMax;
++    uint32_t frame;
++    uint32_t meshVersion; // bumped whenever a scene collision mesh file is written
++    uint32_t teleportSeq; // bumped when Zelda relocates the player (scene spawn, void-out, end of a handoff)
++    float teleportX, teleportY, teleportZ;
++    int16_t teleportYaw;
++    int16_t gridYOffset; // OoT units: block grid is shifted so this scene's main floors sit on block boundaries
++    uint8_t _pad[4];
++};
++
++struct alignas(64) McState { // written by Minecraft
++    uint32_t seq;
++    float x, y, z;   // player feet, OoT units
++    float eyeHeight; // OoT units
++    float fov;       // vertical degrees
++    int16_t yaw, pitch; // OoT binary angles; pitch > 0 looks up
++    uint32_t flags;
++    float health, maxHealth;
++    uint32_t frame;
++    int16_t sceneId;
++    uint8_t selectedSlot;
++    int8_t destroyStage;                  // block being mined: crack stage 0-9, -1 none
++    int32_t destroyX, destroyY, destroyZ; // that block (Minecraft coordinates)
++    uint8_t _pad[4];
++};
++
++struct alignas(64) InputState { // written by Zelda; counters only grow so Minecraft can diff them
++    uint32_t seq;
++    int32_t mouseDxTotal, mouseDyTotal;
++    int32_t wheelTotal;
++    float cursorX, cursorY; // 0..1 inside the Zelda window
++    uint32_t flags;         // bit0: Minecraft currently owns input
++    uint8_t _pad[36];
++};
++
++struct Event {
++    uint8_t type;
++    uint8_t face;
++    uint16_t blockId;
++    int32_t x, y, z;
++    int16_t sceneId;
++    uint16_t radius;
++    uint32_t frame;
++    uint8_t _pad[8];
++};
++
++struct alignas(64) Ring {
++    uint32_t head;
++    uint8_t _p0[60];
++    uint32_t tail;
++    uint8_t _p1[60];
++    Event ev[RING_CAP];
++};
++
++struct alignas(64) SectionSlot {
++    uint32_t gen; // odd while being written
++    int32_t sx, sy, sz;
++    int16_t sceneId;
++    uint16_t nonAir;
++    uint8_t _pad[44];
++    uint16_t blocks[SECTION_VOLUME]; // index = (y*16 + z)*16 + x
++};
++
++struct DynaTri {
++    float v[9];     // OoT units
++    uint32_t flags; // bit0 hookshot surface, bit1 climbable
++};
++
++struct alignas(64) DynaRegion { // moving collision near the player (platforms, doors, blocks), written by Zelda
++    uint32_t seq;
++    uint32_t count;
++    int16_t sceneId;
++    uint8_t _pad[54];
++    DynaTri tris[DYNA_MAX_TRIS];
++};
++
++struct ActorEntry {
++    uint32_t id;
++    int16_t actorType;
++    uint8_t category;
++    uint8_t flags; // bit0 hostile
++    float x, y, z;
++    float radius, height;
++    int16_t health;
++    int16_t yaw;
++    uint8_t _pad[8];
++};
++
++struct alignas(64) ActorRegion { // Zelda actors near the player that Minecraft can hit (stand-in entities)
++    uint32_t seq;
++    uint32_t count;
++    int16_t sceneId;
++    uint8_t _pad[54];
++    ActorEntry actors[MAX_ACTORS];
++};
++
++struct Layout {
++    Header header;
++    LinkState link;
++    McState mc;
++    InputState input;
++    Ring ootToMc;
++    Ring mcToOot;
++    SectionSlot sections[SECTION_SLOTS];
++    DynaRegion dyna;
++    ActorRegion actors;
++};
++
++static_assert(sizeof(Header) == 64, "layout");
++static_assert(sizeof(LinkState) == 64, "layout");
++static_assert(sizeof(McState) == 64, "layout");
++static_assert(sizeof(InputState) == 64, "layout");
++static_assert(sizeof(Event) == 32, "layout");
++static_assert(offsetof(Layout, ootToMc) == 256, "layout");
++static_assert(sizeof(Ring) == 128 + 32 * RING_CAP, "layout");
++static_assert(sizeof(SectionSlot) == 64 + 2 * SECTION_VOLUME, "layout");
++static_assert(offsetof(Layout, sections) == 256 + 2 * (128 + 32 * RING_CAP), "layout");
++static_assert(sizeof(DynaTri) == 40, "layout");
++static_assert(sizeof(DynaRegion) == 64 + 40 * DYNA_MAX_TRIS, "layout");
++static_assert(sizeof(ActorEntry) == 40, "layout");
++static_assert(sizeof(ActorRegion) == 64 + 40 * MAX_ACTORS, "layout");
++
++bool Open();
++void Close();
++Layout* Get();
++const char* TempDirPath();
++
++template <typename T, typename F> void SeqWrite(T& obj, F&& write) {
++    std::atomic_ref<uint32_t> seq(obj.seq);
++    seq.fetch_add(1, std::memory_order_relaxed);
++    std::atomic_thread_fence(std::memory_order_release);
++    write(obj);
++    seq.fetch_add(1, std::memory_order_release);
++}
++
++template <typename T> bool SeqRead(T& shared, T& out) {
++    std::atomic_ref<uint32_t> seq(shared.seq);
++    for (int tries = 0; tries < 8; tries++) {
++        uint32_t s1 = seq.load(std::memory_order_acquire);
++        if (s1 & 1) {
++            continue;
++        }
++        out = shared;
++        std::atomic_thread_fence(std::memory_order_acquire);
++        if (seq.load(std::memory_order_relaxed) == s1) {
++            return true;
++        }
++    }
++    return false;
++}
++
++inline bool Push(Ring& r, const Event& e) {
++    std::atomic_ref<uint32_t> head(r.head), tail(r.tail);
++    uint32_t h = head.load(std::memory_order_relaxed);
++    if (h - tail.load(std::memory_order_acquire) >= RING_CAP) {
++        return false;
++    }
++    r.ev[h & (RING_CAP - 1)] = e;
++    head.store(h + 1, std::memory_order_release);
++    return true;
++}
++
++inline bool Pop(Ring& r, Event& out) {
++    std::atomic_ref<uint32_t> head(r.head), tail(r.tail);
++    uint32_t t = tail.load(std::memory_order_relaxed);
++    if (t == head.load(std::memory_order_acquire)) {
++        return false;
++    }
++    out = r.ev[t & (RING_CAP - 1)];
++    tail.store(t + 1, std::memory_order_release);
++    return true;
++}
++
++} // namespace Bridge
++
++namespace Minecraft {
++// Latest Minecraft player state, or null when Minecraft isn't connected / not in Hyrule
++const Bridge::McState* McPlayer();
++Bridge::InputState* InputRegion();
++void HandleCombatEvent(const Bridge::Event& e);
++} // namespace Minecraft
+diff --git a/soh/soh/Enhancements/Minecraft/Minecraft.h b/soh/soh/Enhancements/Minecraft/Minecraft.h
+new file mode 100644
+index 0000000..c3be5eb
+--- /dev/null
++++ b/soh/soh/Enhancements/Minecraft/Minecraft.h
+@@ -0,0 +1,114 @@
++#pragma once
++
++// "Minecraft Mode": first-person Steve, placeable/breakable blocks and a Minecraft-style HUD layered on top of
++// the full game. The C entry points below are called from small hooks in the decomp sources.
++
++#include <libultraship/libultra.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++#include "z64math.h"
++#ifdef __cplusplus
++}
++#endif
++
++#include "soh/cvar_prefixes.h"
++#define CVAR_MINECRAFT(name) CVAR_ENHANCEMENT("Minecraft." name)
++#define CVAR_MINECRAFT_ENABLED CVAR_MINECRAFT("Enabled")
++#define CVAR_MINECRAFT_STEVE CVAR_MINECRAFT("Steve")
++
++// Extra dynamic collision capacity reserved for block chunks.
++#define MC_EXTRA_DYNA_POLYS 18000
++#define MC_EXTRA_DYNA_VTX 10000
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct PlayState;
++struct Player;
++
++s32 Minecraft_IsEnabled(void);
++// Called at the end of Camera_Update. Returns true if the view was replaced with the first-person view.
++s32 Minecraft_OverrideView(void* camera, Vec3f* eye, Vec3f* at, f32* fov);
++// Called from Player's limb override functions; swaps Link's limbs for Steve's.
++void Minecraft_OverridePlayerLimb(struct PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos,
++                                  struct Player* player, s32 isPauseMenu, s32 emptyHand);
++// Called while the scene collision context is being sized.
++void Minecraft_AdjustCollisionLimits(void* colCtx);
++
++#ifdef __cplusplus
++}
++
++#include <cstdint>
++#include <vector>
++
++struct PlayState;
++struct Player;
++struct Actor;
++
++namespace Minecraft {
++
++constexpr int BLOCK_SIZE = 30; // world units per block (adult Link is ~1.8 blocks tall)
++constexpr int CHUNK_BLOCKS = 16;
++constexpr float REACH = 5.0f * BLOCK_SIZE;
++
++struct BlockPos {
++    int x, y, z;
++    bool operator==(const BlockPos& o) const {
++        return x == o.x && y == o.y && z == o.z;
++    }
++};
++
++// Block world
++void SpawnChunkActors(PlayState* play);
++void RegisterChunkActor();
++void RegisterAttackerActor();
++
++// Minecraft bridge (shared memory with the hidden ootmc Minecraft client)
++bool BridgeConnected();
++void BridgeRequestExplosion(const Vec3f& pos, int radiusBlocks);
++void PushEvent(uint8_t type, int32_t x, int32_t y, int32_t z);
++void RequestTeleport(const Vec3f& pos, s16 yaw);
++// Breakable Hyrule: turn the level surface at a Minecraft block into real blocks / redo saved carves on load
++void CarveTerrain(PlayState* play, int bx, int by, int bz);
++void ReplayCarves(PlayState* play);
++void TerrainTick(PlayState* play);
++void TerrainBlockBroken(PlayState* play, int bx, int by, int bz);
++void TerrainBlast(PlayState* play, int bx, int by, int bz, float radius);
++void SyncZeldaItems(PlayState* play);
++void UseZeldaItem(PlayState* play, int item);
++void RequestItemHandoff(PlayState* play, int slot, int item);
++struct TerrainPiece {
++    float v[9];
++    void* src; // the CollisionPoly it was cut from
++};
++void AppendTerrainPieces(std::vector<TerrainPiece>& out);
++bool IsTerrainPatchActor(::Actor* actor);
++void RegisterTerrainPatchActor();
++void PushFillEvent(int32_t x, int32_t y, int32_t z, uint16_t block);
++void ReexportSceneMesh(PlayState* play);
++int32_t SceneOriginBlocksX(int scene);
++// Vertical offset (OoT units) of the block grid for the current scene
++s16 GridYOffset();
++bool TeleportPending();
++// Replace a whole 16^3 chunk with blocks received from Minecraft; ids indexed (y*16 + z)*16 + x
++void ApplySection(PlayState* play, int cx, int cy, int cz, const uint16_t* ids);
++bool IsBlockChunkActor(::Actor* actor);
++// Minecraft block-state id at a block (Minecraft coordinates), 0 = air, -1 = not received yet
++int McBlockAt(int scene, int bx, int by, int bz);
++
++// Puppet / input (Minecraft drives the player)
++bool PuppetActive();
++bool FirstPersonActive();
++bool HandoffActive();
++uint32_t CurrentLinkFlags(PlayState* play);
++bool OverlayWanted(); // Minecraft drives (or one of its screens is open): show its hand + HUD
++bool HudOverlayActive();
++void PumpInputAtFrameRate(); // every rendered frame
++
++// HUD
++void DrawHud(PlayState* play);
++
++} // namespace Minecraft
++#endif
+diff --git a/soh/soh/Enhancements/Minecraft/MinecraftBlocks.cpp b/soh/soh/Enhancements/Minecraft/MinecraftBlocks.cpp
+new file mode 100644
+index 0000000..c7756c9
+--- /dev/null
++++ b/soh/soh/Enhancements/Minecraft/MinecraftBlocks.cpp
+@@ -0,0 +1,809 @@
++#include "Minecraft.h"
++
++#include <algorithm>
++#include <atomic>
++#include <cmath>
++#include <cstring>
++#include <cstdio>
++#include <fstream>
++#include <map>
++#include <set>
++#include <sstream>
++#include <unordered_map>
++#include <vector>
++
++#include <libultraship/libultraship.h>
++#include "soh/frame_interpolation.h"
++#include "soh/ActorDB.h"
++#include "soh/OTRGlobals.h"
++#include "Bridge.h"
++
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#define NOMINMAX
++#include <Windows.h>
++#endif
++
++extern "C" {
++#include "z64.h"
++#include "macros.h"
++#include "functions.h"
++#include "variables.h"
++extern PlayState* gPlayState;
++}
++
++// Blocks live in 16x16x16 chunks. Each chunk that has blocks gets a custom DynaPoly actor that owns a generated
++// display list (Minecraft's own textures, exported by the Minecraft side) and a generated collision mesh, so Link can stand on, climb, hookshot to and
++// bump into blocks exactly like any other piece of level geometry.
++
++namespace Minecraft {
++
++namespace {
++
++struct ChunkKey {
++    int x, y, z;
++    bool operator<(const ChunkKey& o) const {
++        if (x != o.x)
++            return x < o.x;
++        if (y != o.y)
++            return y < o.y;
++        return z < o.z;
++    }
++};
++
++struct Chunk;
++
++typedef struct {
++    DynaPolyActor dyna;
++    Chunk* chunk;
++} McChunkActor;
++
++struct Chunk {
++    ChunkKey key{};
++    uint16_t blocks[CHUNK_BLOCKS][CHUNK_BLOCKS][CHUNK_BLOCKS]{}; // [x][y][z], Minecraft block-state ids
++    int count = 0;
++    bool dirty = true;
++    bool waitingForTextures = false; // has blocks whose looks Minecraft hasn't exported yet
++    McChunkActor* actor = nullptr;
++
++    // Generated render data
++    std::vector<Vtx> vtx;
++    std::vector<Gfx> gfx;
++
++    // Generated collision data
++    std::vector<Vec3s> colVtx;
++    std::vector<CollisionPoly> colPolys;
++    CollisionHeader colHeader{};
++    bool colRegistered = false;
++};
++
++// scene -> chunks
++std::map<int, std::map<ChunkKey, Chunk*>> sWorld;
++std::map<int, std::set<ChunkKey>> sKnownSections; // sections Minecraft has sent at least once (even all air)
++s16 sChunkActorId = -1;
++int sRegisteredVtx = 0;
++
++SurfaceType sSurfaceTypes[2] = {
++    { { 0x00000000, 0x00000000 } }, // stone-like, not hookshotable
++    { { 0x00000000, 0x00020000 } }, // wood: hookshot target
++};
++
++CamData sNoCameraData[1] = { { CAM_SET_NONE, 0, nullptr } };
++
++int FloorDiv(int a, int b) {
++    return (a >= 0) ? (a / b) : -((-a + b - 1) / b);
++}
++
++int CurrentSceneKey() {
++    return gPlayState != nullptr ? gPlayState->sceneNum : -1;
++}
++
++std::map<ChunkKey, Chunk*>& SceneChunks() {
++    return sWorld[CurrentSceneKey()];
++}
++
++Chunk* FindChunk(const ChunkKey& key) {
++    auto& chunks = SceneChunks();
++    auto it = chunks.find(key);
++    return it == chunks.end() ? nullptr : it->second;
++}
++
++ChunkKey KeyFor(const BlockPos& p) {
++    return { FloorDiv(p.x, CHUNK_BLOCKS), FloorDiv(p.y, CHUNK_BLOCKS), FloorDiv(p.z, CHUNK_BLOCKS) };
++}
++
++void LocalFor(const BlockPos& p, int& lx, int& ly, int& lz) {
++    lx = p.x - FloorDiv(p.x, CHUNK_BLOCKS) * CHUNK_BLOCKS;
++    ly = p.y - FloorDiv(p.y, CHUNK_BLOCKS) * CHUNK_BLOCKS;
++    lz = p.z - FloorDiv(p.z, CHUNK_BLOCKS) * CHUNK_BLOCKS;
++}
++
++uint16_t GetBlockId(const BlockPos& pos) {
++    Chunk* c = FindChunk(KeyFor(pos));
++    if (c == nullptr) {
++        return 0;
++    }
++    int lx, ly, lz;
++    LocalFor(pos, lx, ly, lz);
++    return c->blocks[lx][ly][lz];
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Block looks, exported by Minecraft into %TEMP%/oot_mc_blocktex.bin: for every block state in use, its real
++// textures (resource pack, tints and overlays already applied), its shape and how it collides.
++
++namespace BlockTex {
++constexpr uint32_t MAGIC = 0x58455442; // "BTEX"
++constexpr size_t HEADER = 64, TABLE = 65536 * 2, ENTRY = 16 + 6 * 1024, MAX_SLOTS = 2048;
++constexpr size_t SIZE = HEADER + TABLE + ENTRY * MAX_SLOTS;
++} // namespace BlockTex
++
++enum : u8 { KIND_BOX = 0, KIND_CROSS = 1 };
++enum : u8 { FLAG_OCCLUDES = 1, FLAG_COLLIDES = 2, FLAG_CUTOUT = 4, FLAG_WOOD = 8 };
++
++struct BlockInfo {
++    u8 kind = KIND_BOX;
++    u8 flags = 0;
++    u8 lo[3] = { 0, 0, 0 };    // box min, sixteenths of a block
++    u8 hi[3] = { 16, 16, 16 }; // box max
++    alignas(8) u8 tex[6][16 * 16 * 4]; // RGBA32 per face: -x,+x,-y,+y,-z,+z
++};
++
++#ifdef _WIN32
++HANDLE sTexFile = INVALID_HANDLE_VALUE, sTexMap = nullptr;
++#endif
++const u8* sTexView = nullptr;
++uint32_t sTexSession = 0, sTexCount = 0;
++int sTexRetry = 0;
++// Never freed: display lists point at the pixels, and fresh allocations keep the renderer's texture cache honest
++std::vector<BlockInfo*> sInfos(65536, nullptr);
++
++bool OpenTextures() {
++    if (sTexView != nullptr) {
++        return true;
++    }
++    if (sTexRetry-- > 0) {
++        return false;
++    }
++    sTexRetry = 60;
++#ifdef _WIN32
++    std::string path = std::string(Bridge::TempDirPath()) + "oot_mc_blocktex.bin";
++    sTexFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
++                           OPEN_EXISTING, FILE_ATTRIBUTE_TEMPORARY, nullptr);
++    if (sTexFile == INVALID_HANDLE_VALUE) {
++        return false;
++    }
++    LARGE_INTEGER size{};
++    if (!GetFileSizeEx(sTexFile, &size) || (size_t)size.QuadPart < BlockTex::SIZE) {
++        CloseHandle(sTexFile);
++        sTexFile = INVALID_HANDLE_VALUE;
++        return false;
++    }
++    sTexMap = CreateFileMappingA(sTexFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
++    if (sTexMap == nullptr) {
++        CloseHandle(sTexFile);
++        sTexFile = INVALID_HANDLE_VALUE;
++        return false;
++    }
++    sTexView = (const u8*)MapViewOfFile(sTexMap, FILE_MAP_READ, 0, 0, BlockTex::SIZE);
++#endif
++    return sTexView != nullptr;
++}
++
++uint32_t TexField(size_t offset) {
++    return std::atomic_ref<uint32_t>(*(uint32_t*)(sTexView + offset)).load(std::memory_order_acquire);
++}
++
++void MarkAllChunksDirty(bool onlyWaiting) {
++    for (auto& [scene, chunks] : sWorld) {
++        for (auto& [key, c] : chunks) {
++            if (!onlyWaiting || c->waitingForTextures) {
++                c->dirty = true;
++            }
++        }
++    }
++}
++
++// Once per frame: notice a restarted Minecraft (new palette) or newly exported blocks
++void PollTextures() {
++    if (!OpenTextures() || TexField(0) != BlockTex::MAGIC) {
++        return;
++    }
++    uint32_t session = TexField(4), count = TexField(8);
++    if (session != sTexSession) {
++        sTexSession = session;
++        sTexCount = count;
++        std::fill(sInfos.begin(), sInfos.end(), nullptr);
++        MarkAllChunksDirty(false);
++    } else if (count != sTexCount) {
++        sTexCount = count;
++        MarkAllChunksDirty(true);
++    }
++}
++
++const BlockInfo* Info(uint16_t id) {
++    if (id == 0 || sTexView == nullptr || sTexSession == 0) {
++        return nullptr;
++    }
++    if (sInfos[id] != nullptr) {
++        return sInfos[id];
++    }
++    uint16_t slot = std::atomic_ref<uint16_t>(*(uint16_t*)(sTexView + BlockTex::HEADER + id * 2))
++                        .load(std::memory_order_acquire);
++    if (slot == 0 || slot > BlockTex::MAX_SLOTS) {
++        return nullptr;
++    }
++    const u8* e = sTexView + BlockTex::HEADER + BlockTex::TABLE + (size_t)(slot - 1) * BlockTex::ENTRY;
++    BlockInfo* info = new BlockInfo();
++    info->kind = e[0];
++    info->flags = e[1];
++    for (int i = 0; i < 3; i++) {
++        info->lo[i] = std::min<u8>(e[2 + i], 16);
++        info->hi[i] = std::min<u8>(std::max<u8>(e[5 + i], info->lo[i]), 16);
++    }
++    memcpy(info->tex, e + 16, sizeof(info->tex));
++    sInfos[id] = info;
++    return info;
++}
++
++// Face directions: 0 -x, 1 +x, 2 -y, 3 +y, 4 -z, 5 +z
++const int kFaceDir[6][3] = { { -1, 0, 0 }, { 1, 0, 0 }, { 0, -1, 0 }, { 0, 1, 0 }, { 0, 0, -1 }, { 0, 0, 1 } };
++const u8 kFaceShade[6] = { 153, 153, 128, 255, 204, 204 };
++
++// Corner offsets for each face, listed clockwise when viewed from outside; RebuildMesh walks them backwards so
++// back-face culling and OoT's collision normals both face out. 0 = the box's min on that axis, 1 = its max.
++struct Corner {
++    s8 x, y, z;
++};
++const Corner kFaceCorners[6][4] = {
++    { { 0, 1, 1 }, { 0, 0, 1 }, { 0, 0, 0 }, { 0, 1, 0 } }, // -x
++    { { 1, 1, 0 }, { 1, 0, 0 }, { 1, 0, 1 }, { 1, 1, 1 } }, // +x
++    { { 0, 0, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 1, 0, 0 } }, // -y
++    { { 0, 1, 0 }, { 1, 1, 0 }, { 1, 1, 1 }, { 0, 1, 1 } }, // +y
++    { { 0, 1, 0 }, { 0, 0, 0 }, { 1, 0, 0 }, { 1, 1, 0 } }, // -z
++    { { 1, 1, 1 }, { 1, 0, 1 }, { 0, 0, 1 }, { 0, 1, 1 } }, // +z
++};
++
++// Minecraft's own UV layout (FaceBakery): which texture pixel a point on each face shows, in sixteenths
++void FaceUv(int face, int x, int y, int z, int& s, int& t) {
++    switch (face) {
++        case 0: s = z; t = 16 - y; break;      // west
++        case 1: s = 16 - z; t = 16 - y; break; // east
++        case 2: s = x; t = 16 - z; break;      // down
++        case 3: s = x; t = z; break;           // up
++        case 4: s = 16 - x; t = 16 - y; break; // north
++        default: s = x; t = 16 - y; break;     // south
++    }
++}
++
++bool FullBox(const BlockInfo* b) {
++    return b->kind == KIND_BOX && b->lo[0] == 0 && b->lo[1] == 0 && b->lo[2] == 0 && b->hi[0] == 16 &&
++           b->hi[1] == 16 && b->hi[2] == 16;
++}
++
++bool FaceOnBoundary(const BlockInfo* b, int face) {
++    int axis = face / 2;
++    return (face & 1) ? b->hi[axis] == 16 : b->lo[axis] == 0;
++}
++
++void ComputeNormal(const Vec3s& a, const Vec3s& b, const Vec3s& c, CollisionPoly& poly) {
++    f32 ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
++    f32 vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
++    f32 nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
++    f32 len = sqrtf(nx * nx + ny * ny + nz * nz);
++    if (len > 0.0f) {
++        nx /= len;
++        ny /= len;
++        nz /= len;
++    }
++    poly.normal.x = COLPOLY_SNORMAL(nx);
++    poly.normal.y = COLPOLY_SNORMAL(ny);
++    poly.normal.z = COLPOLY_SNORMAL(nz);
++    poly.dist = (s16)-(nx * a.x + ny * a.y + nz * a.z);
++}
++
++// Model units for a position in sixteenths of a block
++s16 Sixteenths(int g) {
++    return (s16)lroundf(g * (BLOCK_SIZE / 16.0f));
++}
++
++void RebuildMesh(Chunk* c) {
++    struct Quad {
++        int g[4][3]; // corners, sixteenths of a block within the chunk
++        int uv[4][2];
++        u8 shade;
++        const u8* tex;
++        bool cutout;
++    };
++    struct ColFace {
++        int g[4][3];
++        bool wood;
++    };
++    std::vector<Quad> quads;
++    std::vector<ColFace> colFaces;
++    const int baseX = c->key.x * CHUNK_BLOCKS, baseY = c->key.y * CHUNK_BLOCKS, baseZ = c->key.z * CHUNK_BLOCKS;
++    c->waitingForTextures = false;
++
++    for (int x = 0; x < CHUNK_BLOCKS; x++)
++        for (int y = 0; y < CHUNK_BLOCKS; y++)
++            for (int z = 0; z < CHUNK_BLOCKS; z++) {
++                uint16_t id = c->blocks[x][y][z];
++                if (id == 0) {
++                    continue;
++                }
++                const BlockInfo* b = Info(id);
++                if (b == nullptr) {
++                    c->waitingForTextures = true;
++                    continue;
++                }
++                const int org[3] = { x * 16, y * 16, z * 16 };
++                bool cutout = (b->flags & FLAG_CUTOUT) != 0;
++
++                if (b->kind == KIND_CROSS) {
++                    // Two crossed planes (flowers, saplings, torches...), each drawn from both sides
++                    const int d[2][4][3] = { { { 2, 16, 2 }, { 2, 0, 2 }, { 14, 0, 14 }, { 14, 16, 14 } },
++                                             { { 2, 16, 14 }, { 2, 0, 14 }, { 14, 0, 2 }, { 14, 16, 2 } } };
++                    for (int p = 0; p < 2; p++) {
++                        for (int side = 0; side < 2; side++) {
++                            Quad q{};
++                            for (int k = 0; k < 4; k++) {
++                                int kk = side ? 3 - k : k;
++                                for (int a = 0; a < 3; a++) {
++                                    q.g[k][a] = org[a] + d[p][kk][a];
++                                }
++                                q.uv[k][0] = kk < 2 ? 0 : 16;
++                                q.uv[k][1] = d[p][kk][1] == 16 ? 0 : 16;
++                            }
++                            q.shade = 230;
++                            q.tex = b->tex[0];
++                            q.cutout = true;
++                            quads.push_back(q);
++                        }
++                    }
++                    continue;
++                }
++
++                bool collides = (b->flags & FLAG_COLLIDES) != 0;
++                for (int f = 0; f < 6; f++) {
++                    bool hiddenVisual = false, hiddenCollision = false;
++                    if (FaceOnBoundary(b, f)) {
++                        BlockPos n{ baseX + x + kFaceDir[f][0], baseY + y + kFaceDir[f][1],
++                                    baseZ + z + kFaceDir[f][2] };
++                        const BlockInfo* nb = Info(GetBlockId(n));
++                        hiddenVisual = nb != nullptr && (nb->flags & FLAG_OCCLUDES) && FullBox(nb);
++                        hiddenCollision = nb != nullptr && (nb->flags & FLAG_COLLIDES) && FullBox(nb);
++                    }
++                    int corners[4][3];
++                    for (int k = 0; k < 4; k++) {
++                        const Corner& cr = kFaceCorners[f][3 - k]; // table is listed inside-out
++                        corners[k][0] = org[0] + (cr.x ? b->hi[0] : b->lo[0]);
++                        corners[k][1] = org[1] + (cr.y ? b->hi[1] : b->lo[1]);
++                        corners[k][2] = org[2] + (cr.z ? b->hi[2] : b->lo[2]);
++                    }
++                    if (!hiddenVisual) {
++                        Quad q{};
++                        memcpy(q.g, corners, sizeof(corners));
++                        for (int k = 0; k < 4; k++) {
++                            FaceUv(f, corners[k][0] - org[0], corners[k][1] - org[1], corners[k][2] - org[2],
++                                   q.uv[k][0], q.uv[k][1]);
++                        }
++                        q.shade = kFaceShade[f];
++                        q.tex = b->tex[f];
++                        q.cutout = cutout;
++                        quads.push_back(q);
++                    }
++                    if (collides && !hiddenCollision) {
++                        ColFace cf{};
++                        memcpy(cf.g, corners, sizeof(corners));
++                        cf.wood = (b->flags & FLAG_WOOD) != 0;
++                        colFaces.push_back(cf);
++                    }
++                }
++            }
++
++    // ---- Display list: opaque faces first, then cut-out ones (leaves, glass, plants); grouped by texture
++    c->vtx.clear();
++    c->gfx.clear();
++    std::map<std::pair<bool, const u8*>, std::vector<size_t>> groups;
++    for (size_t i = 0; i < quads.size(); i++) {
++        groups[{ quads[i].cutout, quads[i].tex }].push_back(i);
++    }
++    c->vtx.reserve(quads.size() * 4);
++    for (auto& [k, list] : groups) {
++        for (size_t idx : list) {
++            const Quad& q = quads[idx];
++            for (int i = 0; i < 4; i++) {
++                Vtx v{};
++                v.v.ob[0] = Sixteenths(q.g[i][0]);
++                v.v.ob[1] = Sixteenths(q.g[i][1]);
++                v.v.ob[2] = Sixteenths(q.g[i][2]);
++                v.v.tc[0] = (s16)(q.uv[i][0] << 5);
++                v.v.tc[1] = (s16)(q.uv[i][1] << 5);
++                v.v.cn[0] = q.shade;
++                v.v.cn[1] = q.shade;
++                v.v.cn[2] = q.shade;
++                v.v.cn[3] = 255;
++                c->vtx.push_back(v);
++            }
++        }
++    }
++
++    // Each Gfx macro below expands to one or more words; reserve generously so pointers stay stable.
++    c->gfx.resize(32 + groups.size() * 16 + quads.size() * 2 + quads.size() / 8 * 2 + 8);
++    Gfx* g = c->gfx.data();
++    gDPPipeSync(g++);
++    gSPClearGeometryMode(g++, G_LIGHTING | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
++    gSPSetGeometryMode(g++, G_CULL_BACK | G_SHADE | G_SHADING_SMOOTH | G_FOG);
++    gDPSetTextureFilter(g++, G_TF_POINT);
++    gSPTexture(g++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
++    gDPSetCombineMode(g++, G_CC_MODULATEIDECALA, G_CC_PASS2);
++    size_t vBase = 0;
++    bool inCutout = false;
++    for (auto& [k, list] : groups) {
++        if (k.first && !inCutout) {
++            inCutout = true;
++            gDPPipeSync(g++);
++            gDPSetRenderMode(g++, G_RM_FOG_SHADE_A, G_RM_AA_ZB_TEX_EDGE2);
++            gDPSetAlphaCompare(g++, G_AC_THRESHOLD);
++            gDPSetBlendColor(g++, 0, 0, 0, 0x60);
++        }
++        gDPLoadTextureBlock(g++, (void*)k.second, G_IM_FMT_RGBA, G_IM_SIZ_32b, 16, 16, 0, G_TX_NOMIRROR | G_TX_WRAP,
++                            G_TX_NOMIRROR | G_TX_WRAP, 4, 4, G_TX_NOLOD, G_TX_NOLOD);
++        size_t n = list.size();
++        for (size_t f = 0; f < n; f += 8) {
++            size_t batch = std::min<size_t>(8, n - f);
++            gSPVertex(g++, (uintptr_t)&c->vtx[vBase + f * 4], (s32)(batch * 4), 0);
++            for (size_t q = 0; q < batch; q++) {
++                u8 b = (u8)(q * 4);
++                gSP2Triangles(g++, b, b + 1, b + 2, 0, b, b + 2, b + 3, 0);
++            }
++        }
++        vBase += n * 4;
++    }
++    gDPSetTextureFilter(g++, G_TF_BILERP);
++    gSPEndDisplayList(g++);
++    c->gfx.resize(g - c->gfx.data());
++
++    // ---- Collision mesh (shared vertices to stay within the dynapoly vertex budget)
++    c->colVtx.clear();
++    c->colPolys.clear();
++    std::unordered_map<int64_t, u16> vtxIndex;
++    auto getVtx = [&](const int* p) -> u16 {
++        int64_t k = ((int64_t)p[0] << 32) ^ ((int64_t)(p[1] & 0xFFFF) << 16) ^ (int64_t)(p[2] & 0xFFFF);
++        auto it = vtxIndex.find(k);
++        if (it != vtxIndex.end())
++            return it->second;
++        u16 idx = (u16)c->colVtx.size();
++        c->colVtx.push_back({ Sixteenths(p[0]), Sixteenths(p[1]), Sixteenths(p[2]) });
++        vtxIndex[k] = idx;
++        return idx;
++    };
++    for (const ColFace& cf : colFaces) {
++        u16 id[4];
++        for (int k = 0; k < 4; k++) {
++            id[k] = getVtx(cf.g[k]);
++        }
++        const int tris[2][3] = { { 0, 1, 2 }, { 0, 2, 3 } };
++        for (auto& tri : tris) {
++            CollisionPoly p{};
++            p.type = cf.wood ? 1 : 0;
++            p.flags_vIA = id[tri[0]] & 0x1FFF;
++            p.flags_vIB = id[tri[1]] & 0x1FFF;
++            p.vIC = id[tri[2]];
++            ComputeNormal(c->colVtx[id[tri[0]]], c->colVtx[id[tri[1]]], c->colVtx[id[tri[2]]], p);
++            c->colPolys.push_back(p);
++        }
++    }
++
++    CollisionHeader& h = c->colHeader;
++    h = {};
++    h.minBounds = { 0, 0, 0 };
++    h.maxBounds = { CHUNK_BLOCKS * BLOCK_SIZE, CHUNK_BLOCKS * BLOCK_SIZE, CHUNK_BLOCKS * BLOCK_SIZE };
++    h.numVertices = (u16)c->colVtx.size();
++    h.vtxList = c->colVtx.data();
++    h.numPolygons = (u16)c->colPolys.size();
++    h.polyList = c->colPolys.data();
++    h.surfaceTypeList = sSurfaceTypes;
++    // The camera looks up the camera setting of whatever floor Link stands on (it crashed on a null list):
++    // CAM_SET_NONE keeps the scene's own camera
++    h.cameraDataList = sNoCameraData;
++    h.numWaterBoxes = 0;
++    h.waterBoxes = nullptr;
++    h.cameraDataListLen = 1;
++
++    c->dirty = false;
++}
++
++void UnregisterCollision(PlayState* play, Chunk* c) {
++    if (c->colRegistered && c->actor != nullptr) {
++        DynaPoly_DeleteBgActor(play, &play->colCtx.dyna, c->actor->dyna.bgId);
++        c->actor->dyna.bgId = BGACTOR_NEG_ONE;
++        sRegisteredVtx -= c->colHeader.numVertices;
++    }
++    c->colRegistered = false;
++}
++
++void RegisterCollision(PlayState* play, Chunk* c) {
++    if (c->colRegistered || c->actor == nullptr || c->colHeader.numPolygons == 0) {
++        return;
++    }
++    if (sRegisteredVtx + c->colHeader.numVertices > MC_EXTRA_DYNA_VTX - 3600) { // the rest is for dug ground
++        return; // over budget; chunk stays visible but non-solid until something nearer frees space
++    }
++    s32 bgId = DynaPoly_SetBgActor(play, &play->colCtx.dyna, &c->actor->dyna.actor, &c->colHeader);
++    if (bgId == BG_ACTOR_MAX) {
++        return;
++    }
++    c->actor->dyna.bgId = bgId;
++    c->colRegistered = true;
++    sRegisteredVtx += c->colHeader.numVertices;
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Chunk actor
++
++void McChunk_Init(Actor* thisx, PlayState* play) {
++    McChunkActor* self = (McChunkActor*)thisx;
++    DynaPolyActor_Init(&self->dyna, 0);
++    Actor_SetScale(thisx, 1.0f);
++    thisx->room = -1; // keep across room transitions
++    self->chunk = nullptr;
++}
++
++void McChunk_Destroy(Actor* thisx, PlayState* play) {
++    McChunkActor* self = (McChunkActor*)thisx;
++    if (self->chunk != nullptr) {
++        UnregisterCollision(play, self->chunk);
++        self->chunk->actor = nullptr;
++        self->chunk = nullptr;
++    }
++}
++
++void McChunk_Update(Actor* thisx, PlayState* play) {
++    McChunkActor* self = (McChunkActor*)thisx;
++    Chunk* c = self->chunk;
++    if (c == nullptr) {
++        Actor_Kill(thisx);
++        return;
++    }
++    static u32 sPolledFrame = 0;
++    if (sPolledFrame != play->gameplayFrames) {
++        sPolledFrame = play->gameplayFrames;
++        PollTextures();
++    }
++    if (c->dirty) {
++        UnregisterCollision(play, c);
++        RebuildMesh(c);
++    }
++
++    // Only chunks near Link are solid; the dynapoly vertex index space is small.
++    Player* player = GET_PLAYER(play);
++    f32 half = CHUNK_BLOCKS * BLOCK_SIZE * 0.5f;
++    f32 dx = player->actor.world.pos.x - (thisx->world.pos.x + half);
++    f32 dy = player->actor.world.pos.y - (thisx->world.pos.y + half);
++    f32 dz = player->actor.world.pos.z - (thisx->world.pos.z + half);
++    f32 distSq = dx * dx + dy * dy + dz * dz;
++    f32 nearDist = CHUNK_BLOCKS * BLOCK_SIZE * 1.6f;
++    if (distSq < nearDist * nearDist) {
++        RegisterCollision(play, c);
++    } else if (distSq > nearDist * nearDist * 1.5f) {
++        UnregisterCollision(play, c);
++    }
++}
++
++} // namespace
++
++namespace {
++
++constexpr uint16_t kCrackBaseId = 65526; // Minecraft exports its 10 mining-crack textures under these ids
++
++// Minecraft's cracks on the block being mined, if it is in this chunk
++Gfx* BuildCracks(PlayState* play, Chunk* c) {
++    const Bridge::McState* mc = McPlayer();
++    if (mc == nullptr || mc->destroyStage < 0 || mc->destroyStage > 9) {
++        return nullptr;
++    }
++    int lx = mc->destroyX - SceneOriginBlocksX(play->sceneNum) - c->key.x * CHUNK_BLOCKS;
++    int ly = mc->destroyY - Bridge::ORIGIN_Y_BLOCKS - c->key.y * CHUNK_BLOCKS;
++    int lz = mc->destroyZ - c->key.z * CHUNK_BLOCKS;
++    if (lx < 0 || ly < 0 || lz < 0 || lx >= CHUNK_BLOCKS || ly >= CHUNK_BLOCKS || lz >= CHUNK_BLOCKS ||
++        c->blocks[lx][ly][lz] == 0) {
++        return nullptr;
++    }
++    const BlockInfo* crack = Info(kCrackBaseId + mc->destroyStage);
++    if (crack == nullptr) {
++        return nullptr;
++    }
++    const BlockInfo* b = Info(c->blocks[lx][ly][lz]);
++    u8 lo[3] = { 0, 0, 0 }, hi[3] = { 16, 16, 16 };
++    if (b != nullptr && b->kind == KIND_BOX) {
++        memcpy(lo, b->lo, 3);
++        memcpy(hi, b->hi, 3);
++    }
++    static Vtx sVtx[24];
++    static Gfx sGfx[48];
++    const int org[3] = { lx * 16, ly * 16, lz * 16 };
++    const f32 grow = 0.4f; // just outside the block so the cracks sit on its surface
++    for (int f = 0; f < 6; f++) {
++        for (int k = 0; k < 4; k++) {
++            const Corner& cr = kFaceCorners[f][3 - k];
++            int g[3] = { org[0] + (cr.x ? hi[0] : lo[0]), org[1] + (cr.y ? hi[1] : lo[1]),
++                         org[2] + (cr.z ? hi[2] : lo[2]) };
++            int s, t;
++            FaceUv(f, g[0] - org[0], g[1] - org[1], g[2] - org[2], s, t);
++            Vtx& v = sVtx[f * 4 + k];
++            v = {};
++            v.v.ob[0] = (s16)lroundf(g[0] * (BLOCK_SIZE / 16.0f) + (cr.x ? grow : -grow));
++            v.v.ob[1] = (s16)lroundf(g[1] * (BLOCK_SIZE / 16.0f) + (cr.y ? grow : -grow));
++            v.v.ob[2] = (s16)lroundf(g[2] * (BLOCK_SIZE / 16.0f) + (cr.z ? grow : -grow));
++            v.v.tc[0] = (s16)(s << 5);
++            v.v.tc[1] = (s16)(t << 5);
++            v.v.cn[0] = v.v.cn[1] = v.v.cn[2] = v.v.cn[3] = 255;
++        }
++    }
++    Gfx* g = sGfx;
++    gDPPipeSync(g++);
++    gSPClearGeometryMode(g++, G_LIGHTING | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
++    gSPSetGeometryMode(g++, G_CULL_BACK | G_SHADE | G_SHADING_SMOOTH);
++    gDPSetTextureFilter(g++, G_TF_POINT);
++    gSPTexture(g++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
++    gDPSetCombineMode(g++, G_CC_MODULATEIDECALA, G_CC_MODULATEIDECALA);
++    gDPLoadTextureBlock(g++, (void*)crack->tex[0], G_IM_FMT_RGBA, G_IM_SIZ_32b, 16, 16, 0, G_TX_NOMIRROR | G_TX_WRAP,
++                        G_TX_NOMIRROR | G_TX_WRAP, 4, 4, G_TX_NOLOD, G_TX_NOLOD);
++    for (int batch = 0; batch < 3; batch++) {
++        gSPVertex(g++, (uintptr_t)&sVtx[batch * 8], 8, 0);
++        gSP2Triangles(g++, 0, 1, 2, 0, 0, 2, 3, 0);
++        gSP2Triangles(g++, 4, 5, 6, 0, 4, 6, 7, 0);
++    }
++    gDPSetTextureFilter(g++, G_TF_BILERP);
++    gSPEndDisplayList(g++);
++    return sGfx;
++}
++
++} // namespace
++
++// Outside the anonymous namespace: OPEN_DISPS declares extern helpers at block scope
++void McChunk_Draw(Actor* thisx, PlayState* play) {
++    McChunkActor* self = (McChunkActor*)thisx;
++    Chunk* c = self->chunk;
++    if (c == nullptr || c->gfx.empty() || c->vtx.empty()) {
++        return;
++    }
++    GraphicsContext* gfxCtx = play->state.gfxCtx;
++    Gfx_SetupDL_25Opa(gfxCtx);
++    gSPMatrix(gfxCtx->polyOpa.p++, MATRIX_NEWMTX(gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
++    gSPDisplayList(gfxCtx->polyOpa.p++, c->gfx.data());
++    if (Gfx* cracks = BuildCracks(play, c)) {
++        Gfx_SetupDL_25Xlu(gfxCtx);
++        gSPMatrix(gfxCtx->polyXlu.p++, MATRIX_NEWMTX(gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
++        gSPDisplayList(gfxCtx->polyXlu.p++, cracks);
++    }
++}
++
++namespace {
++
++McChunkActor* SpawnActorFor(PlayState* play, Chunk* c) {
++    if (sChunkActorId < 0) {
++        return nullptr;
++    }
++    Actor* a = Actor_Spawn(&play->actorCtx, play, sChunkActorId, (f32)(c->key.x * CHUNK_BLOCKS * BLOCK_SIZE),
++                           (f32)(c->key.y * CHUNK_BLOCKS * BLOCK_SIZE + GridYOffset()),
++                           (f32)(c->key.z * CHUNK_BLOCKS * BLOCK_SIZE), 0,
++                           0, 0, 0);
++    if (a == nullptr) {
++        return nullptr;
++    }
++    McChunkActor* self = (McChunkActor*)a;
++    a->room = -1;
++    self->chunk = c;
++    c->actor = self;
++    c->colRegistered = false;
++    c->dirty = true;
++    return self;
++}
++
++} // namespace
++
++// ---------------------------------------------------------------------------------------------------------------
++
++void ApplySection(PlayState* play, int cx, int cy, int cz, const uint16_t* ids) {
++    ChunkKey key{ cx, cy, cz };
++    sKnownSections[CurrentSceneKey()].insert(key);
++    Chunk* c = FindChunk(key);
++    int nonAir = 0;
++    for (int i = 0; i < CHUNK_BLOCKS * CHUNK_BLOCKS * CHUNK_BLOCKS; i++) {
++        nonAir += ids[i] != 0;
++    }
++    if (c == nullptr) {
++        if (nonAir == 0) {
++            return;
++        }
++        c = new Chunk();
++        c->key = key;
++        SceneChunks()[key] = c;
++    }
++    for (int y = 0; y < CHUNK_BLOCKS; y++)
++        for (int z = 0; z < CHUNK_BLOCKS; z++)
++            for (int x = 0; x < CHUNK_BLOCKS; x++) {
++                c->blocks[x][y][z] = ids[(y * CHUNK_BLOCKS + z) * CHUNK_BLOCKS + x];
++            }
++    c->count = nonAir;
++    if (c->actor == nullptr && nonAir > 0 && play != nullptr) {
++        SpawnActorFor(play, c);
++    }
++    // neighbours may need faces revealed/hidden
++    c->dirty = true;
++    const int base[3] = { cx * CHUNK_BLOCKS, cy * CHUNK_BLOCKS, cz * CHUNK_BLOCKS };
++    for (int f = 0; f < 6; f++) {
++        Chunk* n = FindChunk({ cx + kFaceDir[f][0], cy + kFaceDir[f][1], cz + kFaceDir[f][2] });
++        if (n != nullptr) {
++            n->dirty = true;
++        }
++    }
++    (void)base;
++}
++
++void SpawnChunkActors(PlayState* play) {
++    sRegisteredVtx = 0;
++    for (auto& [key, c] : SceneChunks()) {
++        c->actor = nullptr;
++        c->colRegistered = false;
++        if (c->count > 0) {
++            SpawnActorFor(play, c);
++        }
++    }
++}
++
++int McBlockAt(int scene, int bx, int by, int bz) {
++    BlockPos p{ bx - SceneOriginBlocksX(scene), by - Bridge::ORIGIN_Y_BLOCKS, bz };
++    ChunkKey key = KeyFor(p);
++    auto known = sKnownSections.find(scene);
++    if (known == sKnownSections.end() || !known->second.count(key)) {
++        return -1;
++    }
++    auto chunks = sWorld.find(scene);
++    if (chunks == sWorld.end()) {
++        return 0;
++    }
++    auto it = chunks->second.find(key);
++    if (it == chunks->second.end()) {
++        return 0;
++    }
++    int lx, ly, lz;
++    LocalFor(p, lx, ly, lz);
++    return it->second->blocks[lx][ly][lz];
++}
++
++bool IsBlockChunkActor(::Actor* actor) {
++    return actor != nullptr && sChunkActorId >= 0 && actor->id == sChunkActorId;
++}
++
++void RegisterChunkActor() {
++    static ActorDBInit init = {
++        "Mc_Chunk",
++        "Minecraft Block Chunk",
++        ACTORCAT_BG,
++        (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
++        OBJECT_GAMEPLAY_KEEP,
++        sizeof(McChunkActor),
++        (ActorFunc)McChunk_Init,
++        (ActorFunc)McChunk_Destroy,
++        (ActorFunc)McChunk_Update,
++        (ActorFunc)McChunk_Draw,
++        nullptr,
++    };
++    sChunkActorId = ActorDB::Instance->AddEntry(init).entry.id;
++}
++
++} // namespace Minecraft
++
++extern "C" void Minecraft_AdjustCollisionLimits(void* colCtxPtr) {
++    CollisionContext* colCtx = (CollisionContext*)colCtxPtr;
++    if (!Minecraft_IsEnabled()) {
++        return;
++    }
++    colCtx->dyna.polyListMax += MC_EXTRA_DYNA_POLYS;
++    colCtx->dyna.vtxListMax += MC_EXTRA_DYNA_VTX;
++    colCtx->dyna.polyNodesMax += MC_EXTRA_DYNA_POLYS;
++    colCtx->memSize += MC_EXTRA_DYNA_POLYS * (sizeof(CollisionPoly) + sizeof(SSNode)) + MC_EXTRA_DYNA_VTX * sizeof(Vec3s);
++}
+diff --git a/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
+new file mode 100644
+index 0000000..94833b1
+--- /dev/null
++++ b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
+@@ -0,0 +1,629 @@
++﻿#include "Minecraft.h"
++#include "Bridge.h"
++
++#include <cmath>
++#include <cstring>
++#include <fstream>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++#include <libultraship/libultraship.h>
++#include "soh/ShipInit.hpp"
++#include "soh/Enhancements/game-interactor/GameInteractor.h"
++#include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
++
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#define NOMINMAX
++#include <Windows.h>
++#endif
++
++extern "C" {
++#include "z64.h"
++#include "macros.h"
++#include "functions.h"
++#include "variables.h"
++extern PlayState* gPlayState;
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Shared memory mapping
++
++namespace Bridge {
++
++#ifdef _WIN32
++static HANDLE sFile = INVALID_HANDLE_VALUE;
++static HANDLE sMap = nullptr;
++#endif
++static Layout* sView = nullptr;
++static std::string sTempDir;
++
++const char* TempDirPath() {
++    if (sTempDir.empty()) {
++#ifdef _WIN32
++        char tmp[MAX_PATH];
++        GetTempPathA(MAX_PATH, tmp);
++        sTempDir = tmp;
++#else
++        sTempDir = "/tmp/";
++#endif
++    }
++    return sTempDir.c_str();
++}
++
++bool Open() {
++    if (sView != nullptr) {
++        return true;
++    }
++#ifdef _WIN32
++    std::string path = std::string(TempDirPath()) + "oot_mc_bridge.bin";
++    sFile = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
++                        OPEN_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
++    if (sFile == INVALID_HANDLE_VALUE) {
++        return false;
++    }
++    sMap = CreateFileMappingA(sFile, nullptr, PAGE_READWRITE, 0, (DWORD)sizeof(Layout), nullptr);
++    if (sMap == nullptr) {
++        Close();
++        return false;
++    }
++    sView = (Layout*)MapViewOfFile(sMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(Layout));
++    if (sView == nullptr) {
++        Close();
++        return false;
++    }
++    if (sView->header.magic != MAGIC || sView->header.version != VERSION ||
++        sView->header.totalSize != sizeof(Layout)) {
++        memset(sView, 0, sizeof(Layout));
++        sView->header.version = VERSION;
++        sView->header.totalSize = sizeof(Layout);
++        std::atomic_ref<uint32_t>(sView->header.magic).store(MAGIC, std::memory_order_release);
++    }
++    sView->header.ootPid = GetCurrentProcessId();
++    return true;
++#else
++    return false;
++#endif
++}
++
++void Close() {
++#ifdef _WIN32
++    if (sView != nullptr) {
++        UnmapViewOfFile(sView);
++    }
++    if (sMap != nullptr) {
++        CloseHandle(sMap);
++    }
++    if (sFile != INVALID_HANDLE_VALUE) {
++        CloseHandle(sFile);
++    }
++    sMap = nullptr;
++    sFile = INVALID_HANDLE_VALUE;
++#endif
++    sView = nullptr;
++}
++
++Layout* Get() {
++    return sView;
++}
++
++} // namespace Bridge
++
++// ---------------------------------------------------------------------------------------------------------------
++
++namespace Minecraft {
++
++namespace {
++
++uint64_t sLastMcHeartbeat = 0;
++int sFramesSinceMcBeat = 0; // counts up from boot so an already-running Minecraft can reconnect first
++int sExportedScene = -1;
++uint32_t sMeshVersion = 0;
++uint32_t sTeleportSeq = 0;
++Vec3f sTeleportPos{};
++s16 sTeleportYaw = 0;
++uint32_t sSeenGen[Bridge::SECTION_SLOTS] = {};
++uint16_t sScratch[Bridge::SECTION_VOLUME];
++Bridge::McState sMc{};
++bool sMcValid = false;
++int sLaunchCooldown = 0; // frames until another launch attempt is allowed
++bool sTeleportPending = false;
++int sTeleportPendingFrames = 0;
++int sLastScene = -1;
++void* sLastPlay = nullptr;
++
++int32_t OriginX(int scene) {
++    return scene * Bridge::SCENE_SPACING_BLOCKS;
++}
++
++std::unordered_map<int, s16> sGridOffsets;
++s16 sGridYOffset = 0;
++
++// Shift the block grid vertically so the scene's floors (weighted by area) land on block boundaries.
++// OoT levels are built on round heights, so one offset usually lines up ground, ledges and platforms.
++s16 ComputeGridOffset(CollisionHeader* col) {
++    double weight[30] = {};
++    for (int i = 0; i < col->numPolygons; i++) {
++        CollisionPoly* p = &col->polyList[i];
++        if (COLPOLY_GET_NORMAL(p->normal.y) < 0.9f) {
++            continue;
++        }
++        Vec3s& a = col->vtxList[COLPOLY_VTX_INDEX(p->flags_vIA)];
++        Vec3s& b = col->vtxList[COLPOLY_VTX_INDEX(p->flags_vIB)];
++        Vec3s& c = col->vtxList[p->vIC];
++        f32 area = fabsf((b.x - a.x) * (c.z - a.z) - (c.x - a.x) * (b.z - a.z)) * 0.5f;
++        int y = (int)lroundf((a.y + b.y + c.y) / 3.0f);
++        int m = ((y % 30) + 30) % 30;
++        weight[m] += area;
++    }
++    int best = 0;
++    for (int m = 1; m < 30; m++) {
++        if (weight[m] > weight[best]) {
++            best = m;
++        }
++    }
++    return (s16)best;
++}
++
++u32 SurfaceFlags(CollisionContext* colCtx, CollisionPoly* poly, s32 bgId) {
++    u32 flags = 0;
++    if (SurfaceType_IsHookshotSurface(colCtx, poly, bgId)) {
++        flags |= 1;
++    }
++    u32 wallType = func_80041D94(colCtx, poly, bgId); // wall type: 2 ladder, 3 ladder top, 4 vines
++    if (wallType == 2 || wallType == 3 || wallType == 4) {
++        flags |= 2;
++    }
++    return flags;
++}
++
++// Scene collision mesh for Minecraft's collision field.
++// File: "OOTM" u32, version u32 (2), scene i32, triCount u32, waterCount u32,
++//       triCount * { f32 v[9], u32 flags }, waterCount * { i16 xMin, ySurface, zMin, xLength, zLength, pad }
++void ExportMesh(PlayState* play) {
++    CollisionHeader* col = play->colCtx.colHeader;
++    if (col == nullptr || col->vtxList == nullptr || col->polyList == nullptr) {
++        return;
++    }
++    std::vector<Bridge::DynaTri> tris;
++    tris.reserve(col->numPolygons);
++    for (int i = 0; i < col->numPolygons; i++) {
++        CollisionPoly* p = &col->polyList[i];
++        // Skip polys that only block the camera / are excluded for the player (or were mined away)
++        if (SurfaceType_IsIgnoredByEntities(&play->colCtx, p, BGCHECK_SCENE) ||
++            (p->flags_vIA & 0x4000) /* ignored by entities */) {
++            continue;
++        }
++        // Exit walls (cave mouths, some doorways): walk through them so Link crosses into the exit.
++        // Exit floors stay solid; Link triggers those by standing on them.
++        if (SurfaceType_GetSceneExitIndex(&play->colCtx, p, BGCHECK_SCENE) != 0) {
++            if (COLPOLY_GET_NORMAL(p->normal.y) < 0.5f) {
++                continue;
++            }
++        }
++        Vec3s& a = col->vtxList[COLPOLY_VTX_INDEX(p->flags_vIA)];
++        Vec3s& b = col->vtxList[COLPOLY_VTX_INDEX(p->flags_vIB)];
++        Vec3s& c = col->vtxList[p->vIC];
++        Bridge::DynaTri t{};
++        t.v[0] = a.x; t.v[1] = a.y; t.v[2] = a.z;
++        t.v[3] = b.x; t.v[4] = b.y; t.v[5] = b.z;
++        t.v[6] = c.x; t.v[7] = c.y; t.v[8] = c.z;
++        t.flags = SurfaceFlags(&play->colCtx, p, BGCHECK_SCENE);
++        tris.push_back(t);
++    }
++    // Dug ground: the clipped remains of the level triangles that crossed dug blocks
++    std::vector<TerrainPiece> pieces;
++    AppendTerrainPieces(pieces);
++    for (const TerrainPiece& pc : pieces) {
++        Bridge::DynaTri t{};
++        memcpy(t.v, pc.v, sizeof(t.v));
++        t.flags = SurfaceFlags(&play->colCtx, (CollisionPoly*)pc.src, BGCHECK_SCENE);
++        tris.push_back(t);
++    }
++    std::string path = std::string(Bridge::TempDirPath()) + "oot_mc_mesh_" + std::to_string(play->sceneNum) + ".bin";
++    std::string tmpPath = path + ".tmp";
++    {
++        std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
++        uint32_t header[5] = { 0x4D544F4F, 2, (uint32_t)play->sceneNum, (uint32_t)tris.size(), col->numWaterBoxes };
++        out.write((const char*)header, sizeof(header));
++        out.write((const char*)tris.data(), tris.size() * sizeof(Bridge::DynaTri));
++        for (int i = 0; i < col->numWaterBoxes; i++) {
++            WaterBox& w = col->waterBoxes[i];
++            int16_t wb[6] = { w.xMin, w.ySurface, w.zMin, w.xLength, w.zLength, 0 };
++            out.write((const char*)wb, sizeof(wb));
++        }
++    }
++#ifdef _WIN32
++    MoveFileExA(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
++#else
++    std::rename(tmpPath.c_str(), path.c_str());
++#endif
++    sGridOffsets[play->sceneNum] = ComputeGridOffset(col);
++    sMeshVersion++;
++    SPDLOG_INFO("[OoTCraft] exported {} collision triangles, {} water boxes for scene {}", tris.size(),
++                col->numWaterBoxes, play->sceneNum);
++}
++
++// Moving collision (platforms, elevators, push blocks, doors with collision) near the player, every few frames
++void ExportDyna(PlayState* play) {
++    Bridge::Layout* L = Bridge::Get();
++    Player* player = GET_PLAYER(play);
++    if (L == nullptr || player == nullptr) {
++        return;
++    }
++    DynaCollisionContext* dyna = &play->colCtx.dyna;
++    Vec3f& pp = player->actor.world.pos;
++    const f32 range = 25.0f * Bridge::UNITS_PER_BLOCK;
++    Bridge::SeqWrite(L->dyna, [&](Bridge::DynaRegion& r) {
++        uint32_t n = 0;
++        r.sceneId = play->sceneNum;
++        for (s32 bgId = 0; bgId < BG_ACTOR_MAX && n < Bridge::DYNA_MAX_TRIS; bgId++) {
++            if (!(dyna->bgActorFlags[bgId] & 1)) { // not in use
++                continue;
++            }
++            BgActor* bg = &dyna->bgActors[bgId];
++            if (bg->actor == nullptr || bg->colHeader == nullptr || IsBlockChunkActor(bg->actor) || IsTerrainPatchActor(bg->actor)) {
++                continue; // blocks already exist in Minecraft
++            }
++            f32 dx = bg->boundingSphere.center.x - pp.x, dy = bg->boundingSphere.center.y - pp.y,
++                dz = bg->boundingSphere.center.z - pp.z;
++            f32 reach = range + bg->boundingSphere.radius;
++            if (dx * dx + dy * dy + dz * dz > reach * reach) {
++                continue;
++            }
++            s32 start = bg->dynaLookup.polyStartIndex;
++            s32 count = bg->colHeader->numPolygons;
++            for (s32 i = 0; i < count && n < Bridge::DYNA_MAX_TRIS; i++) {
++                CollisionPoly* p = &dyna->polyList[start + i];
++                Vec3s& a = dyna->vtxList[COLPOLY_VTX_INDEX(p->flags_vIA)];
++                Vec3s& b = dyna->vtxList[COLPOLY_VTX_INDEX(p->flags_vIB)];
++                Vec3s& c = dyna->vtxList[p->vIC];
++                Bridge::DynaTri& t = r.tris[n++];
++                t.v[0] = a.x; t.v[1] = a.y; t.v[2] = a.z;
++                t.v[3] = b.x; t.v[4] = b.y; t.v[5] = b.z;
++                t.v[6] = c.x; t.v[7] = c.y; t.v[8] = c.z;
++                t.flags = SurfaceFlags(&play->colCtx, p, bgId);
++            }
++        }
++        r.count = n;
++    });
++}
++
++void PollSections(PlayState* play) {
++    Bridge::Layout* L = Bridge::Get();
++    for (uint32_t i = 0; i < Bridge::SECTION_SLOTS; i++) {
++        Bridge::SectionSlot& slot = L->sections[i];
++        std::atomic_ref<uint32_t> gen(slot.gen);
++        uint32_t g1 = gen.load(std::memory_order_acquire);
++        if ((g1 & 1) || g1 == sSeenGen[i]) {
++            continue;
++        }
++        int32_t sx = slot.sx, sy = slot.sy, sz = slot.sz;
++        int16_t scene = slot.sceneId;
++        memcpy(sScratch, slot.blocks, sizeof(sScratch));
++        std::atomic_thread_fence(std::memory_order_acquire);
++        if (gen.load(std::memory_order_relaxed) != g1) {
++            continue;
++        }
++        sSeenGen[i] = g1;
++        if (scene != play->sceneNum) {
++            continue;
++        }
++        ApplySection(play, sx - OriginX(scene) / 16, sy - Bridge::ORIGIN_Y_BLOCKS / 16, sz, sScratch);
++    }
++}
++
++void PollEvents(PlayState* play) {
++    TerrainTick(play);
++    SyncZeldaItems(play);
++    Bridge::Layout* L = Bridge::Get();
++    Bridge::Event e;
++    while (Bridge::Pop(L->mcToOot, e)) {
++        switch (e.type) {
++            case Bridge::EV_PLAYER_DIED:
++                // Minecraft health is authoritative: dying there is a Game Over here
++                gSaveContext.health = 0;
++                break;
++            case Bridge::EV_HIT_ACTOR:
++                HandleCombatEvent(e);
++                break;
++            case Bridge::EV_CARVE:
++                if (e.sceneId == play->sceneNum) {
++                    CarveTerrain(play, e.x, e.y, e.z);
++                }
++                break;
++            case Bridge::EV_BLOCK_BROKEN:
++                TerrainBlockBroken(play, e.x, e.y, e.z);
++                break;
++            case Bridge::EV_BLAST:
++                TerrainBlast(play, e.x, e.y, e.z, e.radius / 10.0f);
++                break;
++            case Bridge::EV_USE_ZELDA_ITEM:
++                UseZeldaItem(play, e.x);
++                break;
++            case Bridge::EV_VOID_OUT:
++                if (play->transitionTrigger == TRANS_TRIGGER_OFF && play->transitionMode == TRANS_MODE_OFF) {
++                    Play_TriggerVoidOut(play);
++                }
++                break;
++            default:
++                break;
++        }
++    }
++}
++
++#ifdef _WIN32
++bool FileExists(const std::string& path) {
++    return GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES;
++}
++
++// The ootmc mod folder: the configured one, else next to (or a few folders above) Ship of Harkinian
++std::string FindModDir() {
++    std::string configured = CVarGetString(CVAR_MINECRAFT("ModDir"), "");
++    if (!configured.empty() && FileExists(configured + "\\gradlew.bat")) {
++        return configured;
++    }
++    std::string base = Ship::Context::GetPathRelativeToAppDirectory("");
++    for (const char* rel : { "ootmc", "..\\ootmc", "..\\..\\ootmc", "..\\..\\..\\ootmc" }) {
++        std::string candidate = base + "\\" + rel;
++        if (FileExists(candidate + "\\gradlew.bat")) {
++            char full[MAX_PATH];
++            return GetFullPathNameA(candidate.c_str(), MAX_PATH, full, nullptr) ? std::string(full) : candidate;
++        }
++    }
++    return "";
++}
++
++// A Java 21+ to run Minecraft with: the configured one, JAVA_HOME, or a standard install location
++std::string FindJavaHome() {
++    std::string configured = CVarGetString(CVAR_MINECRAFT("JavaHome"), "");
++    if (!configured.empty() && FileExists(configured + "\\bin\\java.exe")) {
++        return configured;
++    }
++    char env[MAX_PATH];
++    if (GetEnvironmentVariableA("JAVA_HOME", env, MAX_PATH) && FileExists(std::string(env) + "\\bin\\java.exe")) {
++        return env;
++    }
++    for (const char* root : { "C:\\Program Files\\Eclipse Adoptium", "C:\\Program Files\\Java",
++                              "C:\\Program Files\\Microsoft", "C:\\Program Files\\Zulu" }) {
++        WIN32_FIND_DATAA fd;
++        HANDLE h = FindFirstFileA((std::string(root) + "\\jdk-2*").c_str(), &fd);
++        std::string best;
++        if (h != INVALID_HANDLE_VALUE) {
++            do {
++                std::string dir = std::string(root) + "\\" + fd.cFileName;
++                if (FileExists(dir + "\\bin\\java.exe") && dir > best) {
++                    best = dir; // highest version
++                }
++            } while (FindNextFileA(h, &fd));
++            FindClose(h);
++        }
++        if (!best.empty()) {
++            return best;
++        }
++    }
++    return ""; // Gradle falls back to the java on PATH
++}
++#endif
++
++void LaunchMinecraft() {
++#ifdef _WIN32
++    if (sLaunchCooldown > 0 || !CVarGetInteger(CVAR_MINECRAFT("AutoLaunch"), 1)) {
++        return;
++    }
++    sLaunchCooldown = 20 * 120; // give Minecraft two minutes to start before trying again
++    std::string dir = FindModDir();
++    if (dir.empty()) {
++        SPDLOG_ERROR("[OoTCraft] can't find the ootmc Minecraft mod folder (set Minecraft.ModDir in the config)");
++        return;
++    }
++    std::string javaHome = FindJavaHome();
++    if (!javaHome.empty()) {
++        SetEnvironmentVariableA("JAVA_HOME", javaHome.c_str());
++    }
++    std::string cmd = "cmd.exe /c \"\"" + dir + "\\gradlew.bat\" runClient --no-daemon --console=plain > \"" + dir +
++                      "\\run.log\" 2>&1\"";
++    STARTUPINFOA si{};
++    si.cb = sizeof(si);
++    PROCESS_INFORMATION pi{};
++    if (CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, dir.c_str(), &si,
++                       &pi)) {
++        CloseHandle(pi.hThread);
++        CloseHandle(pi.hProcess);
++        SPDLOG_INFO("[OoTCraft] launched hidden Minecraft from {}", dir);
++    } else {
++        SPDLOG_ERROR("[OoTCraft] could not launch Minecraft ({})", GetLastError());
++    }
++#endif
++}
++
++void OnGameFrame() {
++    Bridge::Layout* L = Bridge::Get();
++    if (L == nullptr) {
++        return;
++    }
++    std::atomic_ref<uint64_t>(L->header.ootHeartbeat).fetch_add(1, std::memory_order_release);
++    uint64_t beat = std::atomic_ref<uint64_t>(L->header.mcHeartbeat).load(std::memory_order_acquire);
++    if (beat != sLastMcHeartbeat) {
++        sLastMcHeartbeat = beat;
++        sFramesSinceMcBeat = 0;
++    } else if (sFramesSinceMcBeat < 100000) {
++        sFramesSinceMcBeat++;
++    }
++    Bridge::McState mc;
++    if (Bridge::SeqRead(L->mc, mc) && mc.seq != 0) {
++        sMc = mc;
++        sMcValid = true;
++    }
++    if (sLaunchCooldown > 0) {
++        sLaunchCooldown--;
++    }
++    if (sFramesSinceMcBeat > 60) {
++        LaunchMinecraft(); // first start, or Minecraft closed/crashed
++    }
++}
++
++void OnPlayerUpdateBridge() {
++    if (gPlayState == nullptr || Bridge::Get() == nullptr) {
++        return;
++    }
++    PlayState* play = gPlayState;
++    Player* p = GET_PLAYER(play);
++    Bridge::Layout* L = Bridge::Get();
++    // New scene (or reloaded play state): move Minecraft's player to Link's spawn before the puppet resumes
++    if (p != nullptr && (play->sceneNum != sLastScene || (void*)play != sLastPlay)) {
++        sLastScene = play->sceneNum;
++        sLastPlay = play;
++        memset(sSeenGen, 0, sizeof(sSeenGen)); // re-read every block section for this scene
++        if (sExportedScene != play->sceneNum) {
++            sExportedScene = play->sceneNum;
++            if (play->colCtx.colHeader != nullptr && play->colCtx.colHeader->polyList != nullptr) {
++                sGridOffsets[play->sceneNum] = ComputeGridOffset(play->colCtx.colHeader);
++                sGridYOffset = sGridOffsets[play->sceneNum];
++            }
++            ReplayCarves(play); // ground mined on earlier visits stays mined
++            ExportMesh(play);
++        }
++        auto off = sGridOffsets.find(play->sceneNum);
++        sGridYOffset = off != sGridOffsets.end() ? off->second : 0;
++        SpawnChunkActors(play);
++        RequestTeleport(p->actor.world.pos, p->actor.shape.rot.y);
++    }
++    if (sTeleportPending) {
++        sTeleportPendingFrames++;
++        if (sMcValid && sMc.sceneId == play->sceneNum) {
++            f32 dx = sMc.x - sTeleportPos.x, dy = sMc.y - sTeleportPos.y, dz = sMc.z - sTeleportPos.z;
++            if (dx * dx + dz * dz < 40.0f * 40.0f && fabsf(dy) < 60.0f) {
++                sTeleportPending = false;
++            }
++        }
++        if (sTeleportPendingFrames > 100) {
++            sTeleportPending = false; // give up waiting; Minecraft may not be running
++        }
++    }
++    if (p != nullptr) {
++        Bridge::SeqWrite(L->link, [&](Bridge::LinkState& s) {
++            s.sceneId = play->sceneNum;
++            s.roomId = (uint8_t)play->roomCtx.curRoom.num;
++            s.age = (uint8_t)gSaveContext.linkAge;
++            s.x = p->actor.world.pos.x;
++            s.y = p->actor.world.pos.y;
++            s.z = p->actor.world.pos.z;
++            s.yaw = p->actor.shape.rot.y;
++            s.pitch = p->actor.focus.rot.x;
++            s.flags = CurrentLinkFlags(play);
++            s.health = gSaveContext.health;
++            s.healthMax = gSaveContext.healthCapacity;
++            s.frame = play->gameplayFrames;
++            s.meshVersion = sMeshVersion;
++            s.teleportSeq = sTeleportSeq;
++            s.teleportX = sTeleportPos.x;
++            s.teleportY = sTeleportPos.y;
++            s.teleportZ = sTeleportPos.z;
++            s.teleportYaw = sTeleportYaw;
++            s.gridYOffset = sGridYOffset;
++        });
++    }
++    PollSections(play);
++    PollEvents(play);
++    if ((play->gameplayFrames % 3) == 0) {
++        ExportDyna(play);
++    }
++}
++
++void RegisterBridge() {
++    bool enabled = Minecraft_IsEnabled();
++    if (enabled && !Bridge::Open()) {
++        SPDLOG_ERROR("[OoTCraft] could not open bridge file");
++    }
++    COND_HOOK(OnGameFrameUpdate, enabled, OnGameFrame);
++    COND_HOOK(OnPlayerUpdate, enabled, OnPlayerUpdateBridge);
++}
++
++static RegisterShipInitFunc sInit(RegisterBridge, { CVAR_MINECRAFT_ENABLED });
++
++} // namespace
++
++bool BridgeConnected() {
++    return Bridge::Get() != nullptr && sMcValid && sFramesSinceMcBeat < 30;
++}
++
++const Bridge::McState* McPlayer() {
++    return (BridgeConnected() && (sMc.flags & Bridge::MC_IN_HYRULE)) ? &sMc : nullptr;
++}
++
++void RequestTeleport(const Vec3f& pos, s16 yaw) {
++    sTeleportPos = pos;
++    sTeleportYaw = yaw;
++    sTeleportSeq++;
++    sTeleportPending = true;
++    sTeleportPendingFrames = 0;
++}
++
++s16 GridYOffset() {
++    return sGridYOffset;
++}
++
++bool TeleportPending() {
++    return sTeleportPending;
++}
++
++void PushEvent(uint8_t type, int32_t x, int32_t y, int32_t z) {
++    Bridge::Layout* L = Bridge::Get();
++    if (L == nullptr) {
++        return;
++    }
++    Bridge::Event e{};
++    e.type = type;
++    e.x = x;
++    e.y = y;
++    e.z = z;
++    e.sceneId = gPlayState != nullptr ? gPlayState->sceneNum : -1;
++    Bridge::Push(L->ootToMc, e);
++}
++
++void PushFillEvent(int32_t x, int32_t y, int32_t z, uint16_t block) {
++    Bridge::Layout* L = Bridge::Get();
++    if (L == nullptr || gPlayState == nullptr) {
++        return;
++    }
++    Bridge::Event e{};
++    e.type = Bridge::EV_FILL;
++    e.x = x;
++    e.y = y;
++    e.z = z;
++    e.blockId = block;
++    e.sceneId = gPlayState->sceneNum;
++    Bridge::Push(L->ootToMc, e);
++}
++
++void ReexportSceneMesh(PlayState* play) {
++    ExportMesh(play);
++}
++
++int32_t SceneOriginBlocksX(int scene) {
++    return OriginX(scene);
++}
++
++void BridgeRequestExplosion(const Vec3f& pos, int radiusBlocks) {
++    Bridge::Layout* L = Bridge::Get();
++    if (L == nullptr || gPlayState == nullptr) {
++        return;
++    }
++    Bridge::Event e{};
++    e.type = Bridge::EV_EXPLOSION;
++    e.x = OriginX(gPlayState->sceneNum) + (int)floorf(pos.x / Bridge::UNITS_PER_BLOCK);
++    e.y = Bridge::ORIGIN_Y_BLOCKS + (int)floorf((pos.y - sGridYOffset) / Bridge::UNITS_PER_BLOCK);
++    e.z = (int)floorf(pos.z / Bridge::UNITS_PER_BLOCK);
++    e.sceneId = gPlayState->sceneNum;
++    e.radius = (uint16_t)radiusBlocks;
++    Bridge::Push(L->ootToMc, e);
++}
++
++Bridge::InputState* InputRegion() {
++    Bridge::Layout* L = Bridge::Get();
++    return L != nullptr ? &L->input : nullptr;
++}
++
++} // namespace Minecraft
+diff --git a/soh/soh/Enhancements/Minecraft/MinecraftCombat.cpp b/soh/soh/Enhancements/Minecraft/MinecraftCombat.cpp
+new file mode 100644
+index 0000000..4ce7f90
+--- /dev/null
++++ b/soh/soh/Enhancements/Minecraft/MinecraftCombat.cpp
+@@ -0,0 +1,294 @@
++#include "Minecraft.h"
++#include "Bridge.h"
++
++#include <cmath>
++#include <deque>
++#include <unordered_map>
++
++#include <libultraship/libultraship.h>
++#include "soh/ActorDB.h"
++#include "soh/ShipInit.hpp"
++#include "soh/Enhancements/game-interactor/GameInteractor.h"
++#include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
++
++extern "C" {
++#include "z64.h"
++#include "macros.h"
++#include "functions.h"
++#include "variables.h"
++extern PlayState* gPlayState;
++}
++
++// OoTCraft combat (Zelda side).
++//
++// * Every frame, nearby enemies, bosses, props (grass, pots, rocks) and NPCs are exported so Minecraft can spawn
++//   invisible stand-ins with matching hitboxes.
++// * When Minecraft hits a stand-in, the damage arrives here and a hidden "attacker" actor briefly places an
++//   attack collider on the target with the matching Zelda damage type (sword, arrow, fire, explosion). The target
++//   reacts through its own code, so weak points, immunities, stuns and death animations all behave normally.
++// * Zelda damage to Link is cancelled and sent to Minecraft instead; Minecraft's health is authoritative and Zelda's
++//   hearts mirror it.
++
++namespace Minecraft {
++
++namespace {
++
++struct PendingHit {
++    Actor* target;
++    u32 dmgFlags;
++    u8 damage;
++};
++
++typedef struct {
++    Actor actor;
++    ColliderCylinder collider;
++} McAttacker;
++
++s16 sAttackerId = -1;
++McAttacker* sAttacker = nullptr;
++std::deque<PendingHit> sHits;
++std::unordered_map<Actor*, uint32_t> sIds;
++std::unordered_map<uint32_t, Actor*> sById;
++uint32_t sNextId = 1;
++void* sIdPlay = nullptr;
++s16 sLastHealth = -1;
++bool sReportedDeath = false;
++
++ColliderCylinderInit sAttackInit = {
++    { COLTYPE_NONE, AT_ON | AT_TYPE_PLAYER, AC_NONE, OC1_NONE, OC2_TYPE_PLAYER, COLSHAPE_CYLINDER },
++    { ELEMTYPE_UNK2, { DMG_SLASH_KOKIRI, 0x00, 0x01 }, { 0x00000000, 0x00, 0x00 }, TOUCH_ON | TOUCH_SFX_NORMAL,
++      BUMP_NONE, OCELEM_NONE },
++    { 10, 10, 0, { 0, 0, 0 } },
++};
++
++bool ActorAlive(PlayState* play, Actor* target) {
++    for (int cat = 0; cat < ACTORCAT_MAX; cat++) {
++        for (Actor* a = play->actorCtx.actorLists[cat].head; a != nullptr; a = a->next) {
++            if (a == target) {
++                return a->update != nullptr;
++            }
++        }
++    }
++    return false;
++}
++
++void McAttacker_Init(Actor* thisx, PlayState* play) {
++    McAttacker* self = (McAttacker*)thisx;
++    thisx->room = -1;
++    Collider_InitCylinder(play, &self->collider);
++    Collider_SetCylinder(play, &self->collider, thisx, &sAttackInit);
++    sAttacker = self;
++}
++
++void McAttacker_Destroy(Actor* thisx, PlayState* play) {
++    McAttacker* self = (McAttacker*)thisx;
++    Collider_DestroyCylinder(play, &self->collider);
++    if (sAttacker == self) {
++        sAttacker = nullptr;
++    }
++}
++
++void McAttacker_Update(Actor* thisx, PlayState* play) {
++    McAttacker* self = (McAttacker*)thisx;
++    Player* player = GET_PLAYER(play);
++    if (player != nullptr) {
++        thisx->world.pos = player->actor.world.pos; // knockback pushes targets away from the player
++    }
++    self->collider.base.atFlags &= ~AT_HIT;
++    while (!sHits.empty()) {
++        PendingHit hit = sHits.front();
++        sHits.pop_front();
++        if (!ActorAlive(play, hit.target)) {
++            continue;
++        }
++        Actor* t = hit.target;
++        f32 radius = std::max<f32>(t->colChkInfo.cylRadius, 15.0f) + 5.0f;
++        f32 height = std::max<f32>(t->colChkInfo.cylHeight, 30.0f) + 10.0f;
++        self->collider.dim.radius = (s16)radius;
++        self->collider.dim.height = (s16)height;
++        self->collider.dim.yShift = 0;
++        self->collider.dim.pos.x = (s16)t->world.pos.x;
++        self->collider.dim.pos.y = (s16)(t->world.pos.y - 5.0f);
++        self->collider.dim.pos.z = (s16)t->world.pos.z;
++        self->collider.info.toucher.dmgFlags = hit.dmgFlags;
++        self->collider.info.toucher.damage = hit.damage;
++        CollisionCheck_SetAT(play, &play->colChkCtx, &self->collider.base);
++        break; // one hit per frame; the collision pass resolves it
++    }
++}
++
++uint32_t IdFor(Actor* a) {
++    auto it = sIds.find(a);
++    if (it != sIds.end()) {
++        return it->second;
++    }
++    uint32_t id = sNextId++;
++    sIds[a] = id;
++    sById[id] = a;
++    return id;
++}
++
++void ExportActors(PlayState* play) {
++    Bridge::Layout* L = Bridge::Get();
++    Player* player = GET_PLAYER(play);
++    if (L == nullptr || player == nullptr) {
++        return;
++    }
++    if ((void*)play != sIdPlay) {
++        sIdPlay = play;
++        sIds.clear();
++        sById.clear();
++        sHits.clear();
++    }
++    static const u8 cats[] = { ACTORCAT_ENEMY, ACTORCAT_BOSS, ACTORCAT_PROP, ACTORCAT_NPC, ACTORCAT_MISC };
++    Vec3f& pp = player->actor.world.pos;
++    const f32 range = 25.0f * Bridge::UNITS_PER_BLOCK;
++    Bridge::SeqWrite(L->actors, [&](Bridge::ActorRegion& r) {
++        uint32_t n = 0;
++        r.sceneId = play->sceneNum;
++        for (u8 cat : cats) {
++            for (Actor* a = play->actorCtx.actorLists[cat].head; a != nullptr && n < Bridge::MAX_ACTORS; a = a->next) {
++                if (a->update == nullptr || a->colChkInfo.cylRadius <= 0) {
++                    continue;
++                }
++                f32 dx = a->world.pos.x - pp.x, dy = a->world.pos.y - pp.y, dz = a->world.pos.z - pp.z;
++                if (dx * dx + dy * dy + dz * dz > range * range) {
++                    continue;
++                }
++                Bridge::ActorEntry& e = r.actors[n++];
++                e.id = IdFor(a);
++                e.actorType = a->id;
++                e.category = cat;
++                e.flags = (cat == ACTORCAT_ENEMY || cat == ACTORCAT_BOSS) ? 1 : 0;
++                e.x = a->world.pos.x;
++                e.y = a->world.pos.y;
++                e.z = a->world.pos.z;
++                e.radius = a->colChkInfo.cylRadius;
++                e.height = std::max<f32>(a->colChkInfo.cylHeight, 10.0f);
++                e.health = a->colChkInfo.health;
++                e.yaw = a->shape.rot.y;
++            }
++        }
++        r.count = n;
++    });
++}
++
++// Minecraft damage -> the closest Zelda attack. Sword strength scales with the Minecraft hit.
++void QueueHit(uint32_t id, int32_t kind, int32_t damage100) {
++    auto it = sById.find(id);
++    if (it == sById.end()) {
++        return;
++    }
++    f32 dmg = damage100 / 100.0f;
++    PendingHit hit{ it->second, DMG_SLASH_KOKIRI, 1 };
++    switch (kind) {
++        case Bridge::HIT_ARROW:
++            hit.dmgFlags = DMG_ARROW_NORMAL;
++            hit.damage = 2;
++            break;
++        case Bridge::HIT_FIRE:
++            hit.dmgFlags = DMG_ARROW_FIRE;
++            hit.damage = 2;
++            break;
++        case Bridge::HIT_EXPLOSION:
++            hit.dmgFlags = DMG_EXPLOSIVE;
++            hit.damage = 2;
++            break;
++        case Bridge::HIT_SWEEP:
++            hit.dmgFlags = dmg >= 6.0f ? DMG_SPIN_MASTER : DMG_SPIN_KOKIRI;
++            hit.damage = dmg >= 6.0f ? 2 : 1;
++            break;
++        default:
++            if (dmg >= 9.0f) {
++                hit.dmgFlags = DMG_SLASH_GIANT; // Biggoron-strength
++                hit.damage = 4;
++            } else if (dmg >= 6.0f) {
++                hit.dmgFlags = DMG_SLASH_MASTER;
++                hit.damage = 2;
++            } else if (dmg >= 2.0f) {
++                hit.dmgFlags = DMG_SLASH_KOKIRI;
++                hit.damage = 1;
++            } else {
++                hit.dmgFlags = DMG_DEKU_STICK; // bare hand / weak item
++                hit.damage = 1;
++            }
++            break;
++    }
++    sHits.push_back(hit);
++}
++
++// Minecraft health is the real one; Zelda's hearts mirror it, and Zelda's own damage/healing is forwarded
++void SyncHealth(PlayState* play) {
++    const Bridge::McState* mc = McPlayer();
++    if (mc == nullptr || mc->maxHealth <= 0.0f) {
++        sLastHealth = -1;
++        return;
++    }
++    s16 cur = gSaveContext.health;
++    if (sLastHealth >= 0 && cur != sLastHealth) {
++        if (cur < sLastHealth) {
++            PushEvent(Bridge::EV_PLAYER_HURT, sLastHealth - cur, 0, 0);
++        } else {
++            PushEvent(Bridge::EV_PLAYER_HEAL, cur - sLastHealth, 0, 0);
++        }
++    }
++    s16 cap = gSaveContext.healthCapacity;
++    s16 mirrored = (s16)lroundf(mc->health / mc->maxHealth * cap);
++    if (mc->flags & Bridge::MC_DEAD) {
++        mirrored = 0;
++    } else if (mirrored < 1) {
++        mirrored = 1;
++    }
++    if (mirrored > cap) {
++        mirrored = cap;
++    }
++    gSaveContext.health = mirrored;
++    sLastHealth = mirrored;
++}
++
++void OnPlayerUpdateCombat() {
++    PlayState* play = gPlayState;
++    if (play == nullptr || Bridge::Get() == nullptr) {
++        return;
++    }
++    if (sAttacker == nullptr && sAttackerId >= 0 && BridgeConnected()) {
++        Actor_Spawn(&play->actorCtx, play, sAttackerId, 0, 0, 0, 0, 0, 0, 0);
++    }
++    ExportActors(play);
++    if (BridgeConnected()) {
++        SyncHealth(play);
++    }
++}
++
++void RegisterCombat() {
++    COND_HOOK(OnPlayerUpdate, Minecraft_IsEnabled(), OnPlayerUpdateCombat);
++}
++
++static RegisterShipInitFunc sInit(RegisterCombat, { CVAR_MINECRAFT_ENABLED });
++
++} // namespace
++
++void HandleCombatEvent(const Bridge::Event& e) {
++    if (e.type == Bridge::EV_HIT_ACTOR) {
++        QueueHit((uint32_t)e.x, e.y, e.z);
++    }
++}
++
++void RegisterAttackerActor() {
++    static ActorDBInit init = {
++        "Mc_Attacker",
++        "Minecraft Attack Relay",
++        ACTORCAT_ITEMACTION,
++        (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
++        OBJECT_GAMEPLAY_KEEP,
++        sizeof(McAttacker),
++        (ActorFunc)McAttacker_Init,
++        (ActorFunc)McAttacker_Destroy,
++        (ActorFunc)McAttacker_Update,
++        nullptr,
++        nullptr,
++    };
++    sAttackerId = ActorDB::Instance->AddEntry(init).entry.id;
++}
++
++} // namespace Minecraft
+diff --git a/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
+new file mode 100644
+index 0000000..7cb9f36
+--- /dev/null
++++ b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
+@@ -0,0 +1,534 @@
++#include "Minecraft.h"
++#include "Bridge.h"
++
++#include <cmath>
++
++#include <libultraship/libultraship.h>
++#include <ship/window/Window.h>
++#include "soh/OTRGlobals.h"
++#include "soh/ShipInit.hpp"
++#include "soh/Enhancements/game-interactor/GameInteractor.h"
++#include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
++#include "soh/Enhancements/cosmetics/cosmeticsTypes.h"
++
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#define NOMINMAX
++#include <Windows.h>
++#endif
++
++extern "C" {
++#include "z64.h"
++#include "macros.h"
++#include "functions.h"
++#include "variables.h"
++extern PlayState* gPlayState;
++void Mouse_GetDelta(s32* x, s32* y);
++}
++
++// OoTCraft input + puppet layer (Zelda side).
++//
++// While Minecraft drives the player, the Zelda window keeps focus but its keyboard/mouse are forwarded to the
++// hidden Minecraft client as raw key events, like SkyCraft's InputBridge. Zelda's own controller input is
++// swallowed; Link becomes a puppet placed at Minecraft's player position every frame, and the view uses
++// Minecraft's camera.
++//
++// When Zelda needs input (dialogue, pause menu, ocarina, cutscenes, handoffs) the keyboard drives Zelda instead:
++//   Space / Enter / Left click = A,  Right click / Backspace = B,  Esc = Start,  WASD = stick,
++//   arrows = C buttons (ocarina notes),  Q = Z,  Shift = R.
++
++namespace Minecraft {
++
++namespace {
++
++enum class InputOwner { None, Minecraft, Zelda };
++
++InputOwner sOwner = InputOwner::None;
++bool sPrevVk[256] = {};
++bool sPrevLmb = false, sPrevRmb = false, sPrevMmb = false;
++bool sMouseCaptured = false;
++bool sPuppetActive = false;
++bool sFpActiveThisFrame = false;
++Vec3f sPuppetPos{};
++uint32_t sZeldaPrevSynth = 0;
++int32_t sMouseDxTotal = 0, sMouseDyTotal = 0, sWheelTotal = 0;
++bool sLinkMode = false; // F5 / G: Link plays himself in third person (Zelda camera and controls); Steve follows
++bool sRmbToZelda = false;
++int sPendingItemPress = 0; // frames until C-left is pressed for a Zelda item used from Minecraft // this right-click went to Zelda's A button (talk/open/check) instead of Minecraft
++
++std::shared_ptr<Ship::Window> Window() {
++    return Ship::Context::GetInstance()->GetWindow();
++}
++
++#ifdef _WIN32
++HWND GameHwnd() {
++    HWND fg = GetForegroundWindow();
++    DWORD pid = 0;
++    GetWindowThreadProcessId(fg, &pid);
++    return pid == GetCurrentProcessId() ? fg : nullptr;
++}
++#endif
++
++bool MenuOpen() {
++    auto gui = Window()->GetGui();
++    return gui != nullptr && gui->GetMenuOrMenubarVisible();
++}
++
++void SetCapture(bool capture) {
++    if (capture != sMouseCaptured || capture != Window()->IsMouseCaptured()) {
++        Window()->SetMouseCapture(capture);
++        sMouseCaptured = capture;
++    }
++}
++
++#ifdef _WIN32
++// Windows virtual key -> GLFW key code (0 = not forwarded)
++int VkToGlfw(int vk) {
++    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
++        return vk;
++    }
++    if (vk >= VK_F2 && vk <= VK_F12) {
++        return 290 + (vk - VK_F1);
++    }
++    switch (vk) {
++        case VK_SPACE: return 32;
++        case VK_ESCAPE: return 256;
++        case VK_RETURN: return 257;
++        case VK_TAB: return 258;
++        case VK_BACK: return 259;
++        case VK_DELETE: return 261;
++        case VK_RIGHT: return 262;
++        case VK_LEFT: return 263;
++        case VK_DOWN: return 264;
++        case VK_UP: return 265;
++        case VK_LSHIFT: return 340;
++        case VK_LCONTROL: return 341;
++        case VK_LMENU: return 342;
++        case VK_RSHIFT: return 344;
++        case VK_RCONTROL: return 345;
++        case VK_RMENU: return 346;
++        case VK_OEM_MINUS: return 45;
++        case VK_OEM_PLUS: return 61;
++        case VK_OEM_2: return 47;
++        case VK_OEM_PERIOD: return 46;
++        case VK_OEM_COMMA: return 44;
++        case VK_OEM_1: return 59;
++        case VK_OEM_7: return 39;
++        case VK_OEM_3: return 96;
++        case VK_OEM_4: return 91;
++        case VK_OEM_6: return 93;
++        case VK_OEM_5: return 92;
++        default: return 0;
++    }
++}
++
++int CurrentMods(const bool* vk) {
++    int mods = 0;
++    if (vk[VK_LSHIFT] || vk[VK_RSHIFT]) mods |= 1;
++    if (vk[VK_LCONTROL] || vk[VK_RCONTROL]) mods |= 2;
++    if (vk[VK_LMENU] || vk[VK_RMENU]) mods |= 4;
++    return mods;
++}
++#endif
++
++bool PlayerFrozen(PlayState* play, Player* player) {
++    if (play->transitionTrigger != TRANS_TRIGGER_OFF || play->transitionMode != TRANS_MODE_OFF) {
++        return true;
++    }
++    if (play->csCtx.state != CS_STATE_IDLE || play->msgCtx.msgMode != MSGMODE_NONE || play->pauseCtx.state != 0) {
++        return true;
++    }
++    if (gSaveContext.gameMode != GAMEMODE_NORMAL) {
++        return true;
++    }
++    const u32 busy = PLAYER_STATE1_LOADING | PLAYER_STATE1_IN_CUTSCENE | PLAYER_STATE1_DEAD |
++                     PLAYER_STATE1_GETTING_ITEM | PLAYER_STATE1_IN_ITEM_CS;
++    return (player->stateFlags1 & busy) || (player->stateFlags2 & PLAYER_STATE2_OCARINA_PLAYING);
++}
++
++// The blue A button offers something to do with what's in front of Link
++bool InteractionOffered(PlayState* play) {
++    switch (play->interfaceCtx.unk_1F0) {
++        case DO_ACTION_CHECK:
++        case DO_ACTION_ENTER:
++        case DO_ACTION_OPEN:
++        case DO_ACTION_SPEAK:
++        case DO_ACTION_GRAB:
++        case DO_ACTION_DECIDE:
++        case DO_ACTION_SAVE:
++            return true;
++        default:
++            return false;
++    }
++}
++
++#ifdef _WIN32
++// Mouse totals and cursor for Minecraft
++void PublishInput() {
++    Bridge::InputState* in = InputRegion();
++    if (in == nullptr) {
++        return;
++    }
++    HWND hwnd = GameHwnd();
++    RECT rc{};
++    POINT cur{};
++    float cx = 0.5f, cy = 0.5f;
++    if (hwnd != nullptr && GetClientRect(hwnd, &rc) && GetCursorPos(&cur) && ScreenToClient(hwnd, &cur) &&
++        rc.right > 0 && rc.bottom > 0) {
++        cx = (float)cur.x / rc.right;
++        cy = (float)cur.y / rc.bottom;
++    }
++    Bridge::SeqWrite(*in, [&](Bridge::InputState& s) {
++        s.mouseDxTotal = sMouseDxTotal;
++        s.mouseDyTotal = sMouseDyTotal;
++        s.wheelTotal = sWheelTotal;
++        s.cursorX = cx;
++        s.cursorY = cy;
++        s.flags = sOwner == InputOwner::Minecraft ? 1u : 0u;
++    });
++}
++#endif
++
++bool ZeldaWantsInput(PlayState* play, Player* player) {
++    return play->msgCtx.msgMode != MSGMODE_NONE || play->pauseCtx.state != 0 ||
++           (player->stateFlags2 & PLAYER_STATE2_OCARINA_PLAYING) || play->csCtx.state != CS_STATE_IDLE ||
++           HandoffActive();
++}
++
++#ifdef _WIN32
++void ReleaseAllForwarded() {
++    for (int vk = 0; vk < 256; vk++) {
++        if (sPrevVk[vk]) {
++            int key = VkToGlfw(vk);
++            if (key != 0) {
++                PushEvent(Bridge::EV_KEY, key, 0, 0);
++            }
++        }
++    }
++    if (sPrevLmb) PushEvent(Bridge::EV_MOUSE_BUTTON, 0, 0, 0);
++    if (sPrevRmb) PushEvent(Bridge::EV_MOUSE_BUTTON, 1, 0, 0);
++    if (sPrevMmb) PushEvent(Bridge::EV_MOUSE_BUTTON, 2, 0, 0);
++}
++
++// Keyboard drives Zelda: translate to N64 buttons on top of the regular controller mapping.
++// Dialogue/menus: Space/Enter/LMB = A, RMB = B. Link mode: Space = A, LMB = B (sword), RMB = R (shield),
++// 1/2/3 = C-left/C-down/C-right items, F = C-up.
++void ApplyZeldaKeyboard(Input* input, const bool* vk, bool lmb, bool rmb, bool linkMode) {
++    u32 synth = 0, strip = 0;
++    if (vk[VK_SPACE] || (lmb && !linkMode)) {
++        synth |= BTN_A;
++    }
++    strip |= BTN_START | BTN_L; // the default keyboard map has Start on Space and L on E
++    if ((rmb && !linkMode) || vk[VK_BACK] || (lmb && linkMode)) synth |= BTN_B;
++    if (linkMode) {
++        if (rmb) synth |= BTN_R;
++        if (vk['1']) synth |= BTN_CLEFT;
++        if (vk['2']) synth |= BTN_CDOWN;
++        if (vk['3']) synth |= BTN_CRIGHT;
++        if (vk['F']) synth |= BTN_CUP;
++    }
++    if (vk[VK_RETURN]) synth |= BTN_START;
++    if (sPendingItemPress > 0 && --sPendingItemPress <= 2) {
++        synth |= BTN_CLEFT; // held for a couple of frames: the item comes out
++    }
++    if (vk['Q']) synth |= BTN_Z;
++    if (vk[VK_LSHIFT] || vk[VK_RSHIFT]) synth |= BTN_R;
++    input->cur.button = (input->cur.button & ~strip) | synth;
++    input->press.button = (input->press.button & ~strip) | (synth & ~sZeldaPrevSynth);
++    sZeldaPrevSynth = synth;
++}
++#endif
++
++void OnGameStateMainStart() {
++    PlayState* play = gPlayState;
++    if (play == nullptr || !Minecraft_IsEnabled() || play->state.running == 0) {
++        sPuppetActive = false;
++        SetCapture(false);
++        return;
++    }
++    Player* player = GET_PLAYER(play);
++    if (player == nullptr) {
++        return;
++    }
++    const Bridge::McState* mc = McPlayer();
++    Input* input = &play->state.input[0];
++
++    bool zelda = ZeldaWantsInput(play, player);
++    bool frozen = PlayerFrozen(play, player);
++    InputOwner owner = mc == nullptr ? InputOwner::None : (zelda ? InputOwner::Zelda : InputOwner::Minecraft);
++
++#ifdef _WIN32
++    if (owner != sOwner && sOwner == InputOwner::Minecraft) {
++        ReleaseAllForwarded();
++    }
++    sOwner = owner;
++
++    HWND hwnd = GameHwnd();
++    bool focus = hwnd != nullptr && !MenuOpen();
++    bool vk[256] = {};
++    if (focus) {
++        for (int i = 1; i < 256; i++) {
++            vk[i] = (GetAsyncKeyState(i) & 0x8000) != 0;
++        }
++    }
++    bool lmb = vk[VK_LBUTTON], rmb = vk[VK_RBUTTON], mmb = vk[VK_MBUTTON];
++    bool togglePressed = (vk['G'] && !sPrevVk['G']) || (vk[VK_F5] && !sPrevVk[VK_F5]);
++    if (togglePressed && mc != nullptr && !(mc->flags & Bridge::MC_SCREEN_OPEN) &&
++        play->msgCtx.msgMode == MSGMODE_NONE && play->pauseCtx.state == 0) {
++        sLinkMode = !sLinkMode;
++        player->actor.focus.rot.x = 0; // don't carry Minecraft's last look up/down into third person
++    }
++    bool mcScreen = mc != nullptr && (mc->flags & Bridge::MC_SCREEN_OPEN);
++
++    s32 mdx = 0, mdy = 0;
++    Mouse_GetDelta(&mdx, &mdy);
++    Ship::CoordsF wheel = focus ? Window()->GetMouseWheel() : Ship::CoordsF{ 0, 0 };
++
++    if (owner == InputOwner::Minecraft) {
++        SetCapture(focus && !mcScreen);
++        int mods = CurrentMods(vk);
++        for (int i = 8; i < 256; i++) {
++            if (i == VK_SHIFT || i == VK_CONTROL || i == VK_MENU || i == VK_F1 || i == 'G' || i == VK_F5 ||
++                (i == 'R' && !mcScreen)) {
++                // generic modifiers duplicate L/R variants; F1 opens the SoH menu; G/F5 switch to Zelda's third
++                // person; R is Zelda's A button (talk, open, check)
++                continue;
++            }
++            if (vk[i] == sPrevVk[i]) {
++                continue;
++            }
++            int key = VkToGlfw(i);
++            if ((key == 256 || key == 257) && !mcScreen) {
++                continue; // Esc is the SoH menu; Enter opens Zelda's pause menu (items, map, quest status)
++            }
++            if (key != 0) {
++                PushEvent(Bridge::EV_KEY, key, vk[i] ? 1 : 0, mods);
++            }
++        }
++        if (lmb != sPrevLmb) PushEvent(Bridge::EV_MOUSE_BUTTON, 0, lmb ? 1 : 0, mods);
++        // Right click talks/opens/checks when Zelda offers that action (blue A button), otherwise it's Minecraft's
++        if (rmb && !sPrevRmb && !mcScreen && InteractionOffered(play)) {
++            sRmbToZelda = true;
++        }
++        if (!sRmbToZelda && rmb != sPrevRmb) PushEvent(Bridge::EV_MOUSE_BUTTON, 1, rmb ? 1 : 0, mods);
++        if (!rmb) {
++            sRmbToZelda = false;
++        }
++        if (mmb != sPrevMmb) PushEvent(Bridge::EV_MOUSE_BUTTON, 2, mmb ? 1 : 0, mods);
++        sMouseDxTotal += mdx;
++        sMouseDyTotal += mdy;
++        sWheelTotal += (int32_t)wheel.y;
++
++        // Zelda sees no controller input while Minecraft drives, except Enter -> Start (pause menu) and
++        // R / right click -> A (talk, open doors and chests, check signs)
++        u32 buttons = 0, prevButtons = 0;
++        if (!mcScreen) {
++            buttons |= vk[VK_RETURN] ? BTN_START : 0;
++            prevButtons |= sPrevVk[VK_RETURN] ? BTN_START : 0;
++            buttons |= (vk['R'] || (rmb && sRmbToZelda)) ? BTN_A : 0;
++            prevButtons |= (sPrevVk['R'] || (sPrevRmb && sRmbToZelda)) ? BTN_A : 0;
++        }
++        input->cur = {};
++        input->press = {};
++        input->rel = {};
++        input->cur.button = buttons;
++        input->press.button = buttons & ~prevButtons;
++    } else if (owner == InputOwner::Zelda) {
++        // F5 third person: the mouse orbits Zelda's camera (free look), except in dialogue and menus
++        SetCapture(focus && sLinkMode && play->msgCtx.msgMode == MSGMODE_NONE && play->pauseCtx.state == 0);
++        ApplyZeldaKeyboard(input, vk, lmb, rmb, sLinkMode);
++    } else {
++        SetCapture(false);
++    }
++
++    PublishInput();
++
++    for (int i = 0; i < 256; i++) {
++        sPrevVk[i] = vk[i];
++    }
++    sPrevLmb = lmb;
++    sPrevRmb = rmb;
++    sPrevMmb = mmb;
++#endif
++
++    // Zelda had control (cutscene, dialogue, getting out of bed...) and may have moved Link: hand control back to
++    // Minecraft from where Link ended up
++    static bool sWasZeldaControlled = false;
++    bool zeldaControlled = frozen || sLinkMode;
++    if (sWasZeldaControlled && !zeldaControlled) {
++        RequestTeleport(player->actor.world.pos, player->actor.shape.rot.y);
++    }
++    sWasZeldaControlled = zeldaControlled;
++
++    // Puppet: Link stands wherever Minecraft's player is
++    sPuppetActive = mc != nullptr && !frozen && !HandoffActive() && !TeleportPending() && !(mc->flags & Bridge::MC_DEAD) &&
++                    mc->sceneId == play->sceneNum && fabsf(mc->x) < 32000.0f && fabsf(mc->z) < 32000.0f &&
++                    fabsf(mc->y) < 32000.0f;
++    if (sPuppetActive) {
++        sPuppetPos = { mc->x, mc->y, mc->z };
++        // Zelda's actor-vs-actor push (Mido, signs, rocks, bushes, enemies...) from last frame: keep Link out of
++        // them and move Steve back too, so blockers block
++        Vec3f push = player->actor.colChkInfo.displacement;
++        if (fabsf(push.x) + fabsf(push.z) > 0.05f && fabsf(push.x) + fabsf(push.z) < 60.0f) {
++            sPuppetPos.x += push.x;
++            sPuppetPos.z += push.z;
++            PushEvent(Bridge::EV_NUDGE, (int32_t)(push.x * 100.0f), 0, (int32_t)(push.z * 100.0f));
++        }
++        player->actor.colChkInfo.displacement = { 0, 0, 0 }; // already applied above
++        player->actor.world.pos = sPuppetPos;
++        player->actor.prevPos = sPuppetPos;
++        player->actor.velocity = { 0, 0, 0 };
++        player->actor.speedXZ = 0.0f;
++        player->actor.shape.rot.y = mc->yaw;
++        player->actor.world.rot.y = mc->yaw;
++        player->yaw = mc->yaw;
++        // Steve looks straight ahead: the camera (and the hidden first-person body) does the looking up and down
++        player->actor.focus.rot.x = 0;
++        // No fall damage or hard landings from Zelda: Minecraft decides falls
++        player->fallStartHeight = (s16)player->actor.world.pos.y;
++        player->fallDistance = 0;
++    }
++}
++
++// After Link's update: if Zelda moved Link far from where we put him (void-out respawn, warp, scripted move),
++// move Minecraft's player there too.
++void OnPlayerUpdate() {
++    if (!sPuppetActive || gPlayState == nullptr) {
++        return;
++    }
++    Player* player = GET_PLAYER(gPlayState);
++    f32 dx = player->actor.world.pos.x - sPuppetPos.x, dy = player->actor.world.pos.y - sPuppetPos.y,
++        dz = player->actor.world.pos.z - sPuppetPos.z;
++    if (dx * dx + dz * dz > 60.0f * 60.0f || fabsf(dy) > 120.0f) {
++        RequestTeleport(player->actor.world.pos, player->actor.shape.rot.y);
++    }
++}
++
++// Zelda's HUD stays until Minecraft's own HUD layer is drawn into the frame; undo the old prototype's hiding
++void RestoreZeldaHud() {
++    static const char* elements[] = { "HUD.HeartsCount.PosType", "HUD.MagicBar.PosType",    "HUD.BButton.PosType",
++                                      "HUD.CLeftButton.PosType", "HUD.CDownButton.PosType", "HUD.CRightButton.PosType",
++                                      "HUD.CUpButton.PosType",   "HUD.StartButton.PosType", "HUD.AButton.PosType",
++                                      "HUD.Minimap.PosType" };
++    for (const char* e : elements) {
++        std::string name = std::string(CVAR_PREFIX_COSMETIC) + "." + e;
++        if (CVarGetInteger(name.c_str(), 0) == HIDDEN) {
++            CVarClear(name.c_str());
++        }
++    }
++}
++
++void RegisterControls() {
++    bool enabled = Minecraft_IsEnabled();
++    RestoreZeldaHud();
++    COND_HOOK(OnGameStateMainStart, enabled, OnGameStateMainStart);
++    COND_HOOK(OnPlayerUpdate, enabled, OnPlayerUpdate);
++    COND_HOOK(OnPlayDrawEnd, enabled, []() {
++        if (gPlayState != nullptr) {
++            DrawHud(gPlayState);
++        }
++    });
++    if (!enabled) {
++        SetCapture(false);
++    }
++}
++
++static RegisterShipInitFunc sInit(RegisterControls, { CVAR_MINECRAFT_ENABLED });
++
++} // namespace
++
++bool OverlayWanted() {
++    const Bridge::McState* mc = McPlayer();
++    return mc != nullptr && (sOwner == InputOwner::Minecraft || (mc->flags & Bridge::MC_SCREEN_OPEN)) && !sLinkMode;
++}
++
++bool PuppetActive() {
++    return sPuppetActive;
++}
++
++bool FirstPersonActive() {
++    return sFpActiveThisFrame;
++}
++
++uint32_t CurrentLinkFlags(PlayState* play) {
++    Player* player = GET_PLAYER(play);
++    uint32_t flags = Bridge::LINK_IN_PLAY;
++    if (player == nullptr) {
++        return flags;
++    }
++    if (PlayerFrozen(play, player)) flags |= Bridge::LINK_FROZEN;
++    if (HandoffActive()) flags |= Bridge::LINK_HANDOFF;
++    if (ZeldaWantsInput(play, player)) flags |= Bridge::LINK_ZELDA_INPUT;
++    return flags;
++}
++
++// Every rendered frame (not just Zelda's 20 game ticks a second): pass mouse motion and the cursor on to
++// Minecraft right away, so looking around and the inventory cursor are as smooth as the frame rate
++void PumpInputAtFrameRate() {
++#ifdef _WIN32
++    if (sOwner != InputOwner::Minecraft) {
++        return;
++    }
++    if (sMouseCaptured) {
++        Ship::Coords d = Window()->GetMouseDelta();
++        sMouseDxTotal += d.x;
++        sMouseDyTotal += d.y;
++    }
++    PublishInput();
++#endif
++}
++
++// Steve used the Minecraft version of a Zelda item: Link takes over (third person) and uses it from C-left
++void RequestItemHandoff(PlayState* play, int slot, int item) {
++    gSaveContext.equips.buttonItems[1] = item;
++    gSaveContext.equips.cButtonSlots[0] = slot;
++    Interface_LoadItemIcon1(play, 1);
++    if (!sLinkMode) {
++        sLinkMode = true;
++        GET_PLAYER(play)->actor.focus.rot.x = 0;
++    }
++    sPendingItemPress = 5;
++}
++
++bool HandoffActive() {
++    return sLinkMode && McPlayer() != nullptr;
++}
++
++} // namespace Minecraft
++
++extern "C" s32 Minecraft_IsEnabled(void) {
++    return CVarGetInteger(CVAR_MINECRAFT_ENABLED, 1);
++}
++
++// Zelda renders from Minecraft's camera while Minecraft drives the player
++extern "C" s32 Minecraft_OverrideView(void* cameraPtr, Vec3f* eye, Vec3f* at, f32* fov) {
++    using namespace Minecraft;
++    Camera* camera = (Camera*)cameraPtr;
++    PlayState* play = camera->play;
++    if (camera != play->cameraPtrs[MAIN_CAM]) {
++        return false;
++    }
++    sFpActiveThisFrame = false;
++    if (play->activeCamera != MAIN_CAM || !sPuppetActive) {
++        return false;
++    }
++    const Bridge::McState* mc = McPlayer();
++    if (mc == nullptr || (mc->flags & Bridge::MC_THIRD_PERSON)) {
++        return false;
++    }
++    // Pre-rendered rooms (houses, shops, Castle Town) are a painted background with a fixed camera
++    if (play->roomCtx.curRoom.meshHeader != nullptr && play->roomCtx.curRoom.meshHeader->base.type == 1) {
++        return false;
++    }
++    f32 cp = Math_CosS(mc->pitch);
++    Vec3f d = { Math_SinS(mc->yaw) * cp, Math_SinS(mc->pitch), Math_CosS(mc->yaw) * cp };
++    eye->x = mc->x;
++    eye->y = mc->y + mc->eyeHeight;
++    eye->z = mc->z;
++    at->x = eye->x + d.x * 100.0f;
++    at->y = eye->y + d.y * 100.0f;
++    at->z = eye->z + d.z * 100.0f;
++    *fov = mc->fov;
++    sFpActiveThisFrame = true;
++    return true;
++}
+diff --git a/soh/soh/Enhancements/Minecraft/MinecraftHud.cpp b/soh/soh/Enhancements/Minecraft/MinecraftHud.cpp
+new file mode 100644
+index 0000000..4f6b854
+--- /dev/null
++++ b/soh/soh/Enhancements/Minecraft/MinecraftHud.cpp
+@@ -0,0 +1,47 @@
++#include "Minecraft.h"
++
++#include <libultraship/libultraship.h>
++#include "soh/frame_interpolation.h"
++
++extern "C" {
++#include "z64.h"
++#include "macros.h"
++#include "functions.h"
++#include "variables.h"
++}
++
++// Fallback crosshair drawn by Zelda while Minecraft's own HUD layer isn't composited into the frame.
++
++namespace Minecraft {
++
++namespace {
++
++void FillRect(Gfx** gfx, int x0, int y0, int x1, int y1, u8 r, u8 g, u8 b, u8 a) {
++    Gfx* g2 = *gfx;
++    gDPPipeSync(g2++);
++    gDPSetCombineMode(g2++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
++    gDPSetPrimColor(g2++, 0, 0, r, g, b, a);
++    gDPFillRectangle(g2++, x0, y0, x1, y1);
++    *gfx = g2;
++}
++
++} // namespace
++
++bool HudOverlayActive();
++
++void DrawHud(PlayState* play) {
++    if (!FirstPersonActive() || HudOverlayActive()) {
++        return;
++    }
++    GraphicsContext* __gfxCtx = play->state.gfxCtx; // (OPEN_DISPS without frame-interpolation child records)
++    Gfx_SetupDL_39Overlay(play->state.gfxCtx);
++    Gfx* g = OVERLAY_DISP;
++    FillRect(&g, 155, 119, 166, 121, 0, 0, 0, 120);
++    FillRect(&g, 159, 115, 161, 126, 0, 0, 0, 120);
++    FillRect(&g, 156, 119, 165, 120, 255, 255, 255, 220);
++    FillRect(&g, 160, 116, 161, 125, 255, 255, 255, 220);
++    OVERLAY_DISP = g;
++}
++
++
++} // namespace Minecraft
+diff --git a/soh/soh/Enhancements/Minecraft/MinecraftItems.cpp b/soh/soh/Enhancements/Minecraft/MinecraftItems.cpp
+new file mode 100644
+index 0000000..1165243
+--- /dev/null
++++ b/soh/soh/Enhancements/Minecraft/MinecraftItems.cpp
+@@ -0,0 +1,65 @@
++#include "Minecraft.h"
++#include "Bridge.h"
++
++#include <libultraship/libultraship.h>
++
++extern "C" {
++#include "z64.h"
++#include "macros.h"
++#include "functions.h"
++#include "variables.h"
++extern PlayState* gPlayState;
++}
++
++// Link's items in Minecraft. Every couple of seconds Zelda tells Minecraft which items Link owns, and Minecraft
++// keeps a matching item in Steve's inventory. Using one of those comes back here: bombs come out as real Zelda
++// bombs at Steve's feet, the rest are handed to Link (third person, item on C-left, pressed for you).
++
++namespace Minecraft {
++
++void SyncZeldaItems(PlayState* play) {
++    static u32 sLastSync = 0;
++    if (play == nullptr || play->gameplayFrames - sLastSync < 40 || !BridgeConnected()) {
++        return;
++    }
++    sLastSync = play->gameplayFrames;
++    for (int slot = 0; slot < 24; slot++) {
++        u8 item = gSaveContext.inventory.items[slot];
++        if (item != ITEM_NONE && item < ITEM_SOLD_OUT + 12) {
++            PushEvent(Bridge::EV_GIVE_ITEM, item, 0, 0);
++        }
++    }
++}
++
++void UseZeldaItem(PlayState* play, int item) {
++    if (play == nullptr || item < 0 || item >= ITEM_NONE) {
++        return;
++    }
++    Player* player = GET_PLAYER(play);
++    if (item == ITEM_BOMB) {
++        if (AMMO(ITEM_BOMB) <= 0) {
++            Sfx_PlaySfxCentered(NA_SE_SY_ERROR);
++            return;
++        }
++        // A lit bomb a step in front of Steve
++        f32 s = Math_SinS(player->actor.shape.rot.y), c = Math_CosS(player->actor.shape.rot.y);
++        Actor* bomb = Actor_Spawn(&play->actorCtx, play, ACTOR_EN_BOM, player->actor.world.pos.x + s * 35.0f,
++                                  player->actor.world.pos.y + 20.0f, player->actor.world.pos.z + c * 35.0f, 0, 0, 0,
++                                  0 /* BOMB_BODY */);
++        if (bomb != nullptr) {
++            bomb->velocity.y = 4.0f;
++            bomb->speedXZ = 3.0f;
++            bomb->world.rot.y = player->actor.shape.rot.y;
++            Inventory_ChangeAmmo(ITEM_BOMB, -1);
++        }
++        return;
++    }
++    for (int slot = 0; slot < 24; slot++) {
++        if (gSaveContext.inventory.items[slot] == item) {
++            RequestItemHandoff(play, slot, item);
++            return;
++        }
++    }
++}
++
++} // namespace Minecraft
+diff --git a/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp b/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp
+new file mode 100644
+index 0000000..511eb72
+--- /dev/null
++++ b/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp
+@@ -0,0 +1,254 @@
++﻿#include "Minecraft.h"
++#include "Bridge.h"
++
++#include <atomic>
++#include <cstring>
++#include <memory>
++#include <string>
++#include <vector>
++
++#include <libultraship/libultraship.h>
++#include <ship/window/gui/GuiWindow.h>
++#include <fast/Fast3dWindow.h>
++#include <fast/interpreter.h>
++#include <fast/backends/gfx_rendering_api.h>
++#include "soh/ShipInit.hpp"
++#include "soh/Enhancements/game-interactor/GameInteractor.h"
++#include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
++#include "soh/Enhancements/cosmetics/cosmeticsTypes.h"
++
++extern "C" {
++#include "z64.h"
++#include "variables.h"
++extern PlayState* gPlayState;
++}
++
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#define NOMINMAX
++#include <Windows.h>
++#endif
++
++// Minecraft's first-person hand and HUD (hotbar, hearts, crosshair, inventory, chat), rendered by the hidden
++// Minecraft client and shared through %TEMP%/oot_mc_frame.bin, drawn over Zelda's game view every frame.
++
++namespace Minecraft {
++
++namespace {
++
++constexpr int kMaxW = 1920, kMaxH = 1080, kHeader = 64;
++
++#ifdef _WIN32
++HANDLE sFile = INVALID_HANDLE_VALUE, sMap = nullptr;
++#endif
++uint8_t* sView = nullptr;
++uint32_t sLastSeq = 0;
++std::vector<uint8_t> sPixels;
++int sTexW = 0, sTexH = 0;
++uint32_t sTextureId = 0;
++bool sTextureValid = false;
++bool sHudHidden = false;
++
++bool OpenFrame() {
++    if (sView != nullptr) {
++        return true;
++    }
++#ifdef _WIN32
++    std::string path = std::string(Bridge::TempDirPath()) + "oot_mc_frame.bin";
++    sFile = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
++                        OPEN_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
++    if (sFile == INVALID_HANDLE_VALUE) {
++        return false;
++    }
++    const DWORD size = kHeader + kMaxW * kMaxH * 4;
++    sMap = CreateFileMappingA(sFile, nullptr, PAGE_READWRITE, 0, size, nullptr);
++    if (sMap == nullptr) {
++        return false;
++    }
++    sView = (uint8_t*)MapViewOfFile(sMap, FILE_MAP_ALL_ACCESS, 0, 0, size);
++#endif
++    return sView != nullptr;
++}
++
++uint32_t& Field(int offset) {
++    return *(uint32_t*)(sView + offset);
++}
++
++// Copy the newest complete frame out of shared memory (seqlock), returns true if a new one arrived
++bool FetchFrame() {
++    std::atomic_ref<uint32_t> seq(Field(0));
++    uint32_t s1 = seq.load(std::memory_order_acquire);
++    if ((s1 & 1) || s1 == sLastSeq || s1 == 0) {
++        return false;
++    }
++    int w = (int)Field(4), h = (int)Field(8);
++    if (w <= 0 || h <= 0 || w > kMaxW || h > kMaxH) {
++        return false;
++    }
++    sPixels.resize((size_t)w * h * 4);
++    memcpy(sPixels.data(), sView + kHeader, sPixels.size());
++    std::atomic_thread_fence(std::memory_order_acquire);
++    if (seq.load(std::memory_order_relaxed) != s1) {
++        return false; // torn: try next frame
++    }
++    sLastSeq = s1;
++    sTexW = w;
++    sTexH = h;
++    return true;
++}
++
++Fast::GfxRenderingAPI* RenderingApi() {
++    auto window = std::dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetInstance()->GetWindow());
++    if (window == nullptr) {
++        return nullptr;
++    }
++    auto interpreter = window->GetInterpreterWeak().lock();
++    return interpreter ? interpreter->GetCurrentRenderingAPI() : nullptr;
++}
++
++void SetZeldaHudHidden(bool hide) {
++    if (hide == sHudHidden) {
++        return;
++    }
++    sHudHidden = hide;
++    // Minecraft's hotbar and hearts replace these; rupees, keys and the A-button prompt stay. The minimap sits where
++    // Minecraft's hand is drawn, so it only shows in Zelda's third person (F5) and on the pause screen
++    static const char* elements[] = { "HUD.HeartsCount.PosType", "HUD.MagicBar.PosType",    "HUD.BButton.PosType",
++                                      "HUD.CLeftButton.PosType", "HUD.CDownButton.PosType", "HUD.CRightButton.PosType",
++                                      "HUD.CUpButton.PosType",   "HUD.Minimap.PosType" };
++    for (const char* e : elements) {
++        std::string name = std::string(CVAR_PREFIX_COSMETIC) + "." + e;
++        if (hide) {
++            CVarSetInteger(name.c_str(), HIDDEN);
++        } else {
++            CVarClear(name.c_str());
++        }
++    }
++}
++
++// The A button only shows while it has something to say ("Open", "Talk", "Check"...); an empty blue disc
++// floating over Minecraft's HUD looks broken
++void UpdateAButton(bool overlay) {
++    static bool sAHidden = false;
++    bool hide = overlay && gPlayState != nullptr && gPlayState->interfaceCtx.unk_1F0 == DO_ACTION_NONE;
++    if (hide == sAHidden) {
++        return;
++    }
++    sAHidden = hide;
++    std::string name = std::string(CVAR_PREFIX_COSMETIC) + ".HUD.AButton.PosType";
++    if (hide) {
++        CVarSetInteger(name.c_str(), HIDDEN);
++    } else {
++        CVarClear(name.c_str());
++    }
++}
++
++class OverlayWindow : public Ship::GuiWindow {
++  public:
++    using GuiWindow::GuiWindow;
++
++    void Draw() override {
++        DrawElement();
++    }
++
++    void DrawElement() override {
++        // Frame rate log (every 10 s) to keep an eye on performance
++        static uint32_t sFrames = 0;
++        static uint64_t sFpsStart = 0;
++        uint64_t now = GetTickCount64();
++        sFrames++;
++        if (sFpsStart == 0) {
++            sFpsStart = now;
++        } else if (now - sFpsStart >= 10000) {
++            SPDLOG_INFO("[OoTCraft] Zelda drawing {:.0f} FPS", sFrames * 1000.0 / (now - sFpsStart));
++            sFrames = 0;
++            sFpsStart = now;
++        }
++        PumpInputAtFrameRate();
++        bool want = OverlayWanted();
++        SetZeldaHudHidden(want);
++        UpdateAButton(want);
++        if (!OpenFrame()) {
++            return;
++        }
++        ImGuiWindow* game = ImGui::FindWindowByName("Main Game");
++        if (game != nullptr && game->Size.x > 0 && game->Size.y > 0) {
++            // Same aspect as the game view, capped at 1280x720 to keep the per-frame copy cheap
++            float scale = std::min(1.0f, std::min(1280.0f / game->Size.x, 720.0f / game->Size.y));
++            Field(16) = (uint32_t)(game->Size.x * scale);
++            Field(20) = (uint32_t)(game->Size.y * scale);
++        }
++        Field(28) = want ? 1u : 0u; // Minecraft skips the readback while nothing is shown
++        if (!want || Field(24) == 0 || game == nullptr) {
++            return;
++        }
++        Fast::GfxRenderingAPI* api = RenderingApi();
++        if (api == nullptr) {
++            return;
++        }
++        if (FetchFrame()) {
++            if (sTextureId == 0) {
++                sTextureId = api->NewTexture();
++            }
++            api->SelectTexture(0, sTextureId);
++            api->SetSamplerParameters(0, true, G_TX_CLAMP, G_TX_CLAMP);
++            api->UploadTexture(sPixels.data(), sTexW, sTexH);
++            sTextureValid = true;
++        }
++        if (!sTextureValid) {
++            return;
++        }
++        // Cover the game view; with the menu bar hidden that is the whole main viewport (this also stays correct
++        // under Windows display scaling, where the game window's own size can disagree with the screen)
++        ImGuiViewport* vp = ImGui::GetMainViewport();
++        ImVec2 min = vp->WorkPos;
++        ImVec2 max = ImVec2(vp->WorkPos.x + vp->WorkSize.x, vp->WorkPos.y + vp->WorkSize.y);
++        ImGui::GetForegroundDrawList(vp)->AddImage(api->GetTextureById(sTextureId), min, max);
++    }
++
++  protected:
++    void InitElement() override {
++    }
++    void UpdateElement() override {
++    }
++};
++
++std::shared_ptr<OverlayWindow> sOverlay;
++
++void RegisterOverlay() {
++    COND_HOOK(OnGameFrameUpdate, Minecraft_IsEnabled(), []() {
++        if (sOverlay == nullptr) {
++            auto gui = Ship::Context::GetInstance()->GetWindow()->GetGui();
++            if (gui != nullptr) {
++                sOverlay = std::make_shared<OverlayWindow>(CVAR_WINDOW("OoTCraftOverlay"), true, "OoTCraft Overlay");
++                gui->AddGuiWindow(sOverlay);
++                // Mouse look at Zelda's native 20 FPS feels laggy: draw interpolated frames at the monitor's
++                // refresh rate (applied once; it can be changed back in Settings > Graphics)
++                // A fixed 120 FPS: matching a 240 Hz 4K monitor costs more than it looks
++                if (CVarGetInteger(CVAR_MINECRAFT("PerfDefaultsApplied"), 0) < 2) {
++                    CVarSetInteger(CVAR_SETTING("MatchRefreshRate"), 0);
++                    CVarSetInteger(CVAR_SETTING("InterpolationFPS"), 120);
++                    CVarSetInteger(CVAR_MINECRAFT("PerfDefaultsApplied"), 2);
++                    gui->SaveConsoleVariablesNextFrame();
++                }
++                // F5 third person is Zelda's camera: let the mouse orbit it
++                if (!CVarGetInteger(CVAR_MINECRAFT("ThirdPersonMouseApplied"), 0)) {
++                    CVarSetInteger(CVAR_SETTING("EnableMouse"), 1);
++                    CVarSetInteger(CVAR_SETTING("FreeLook.Enabled"), 1);
++                    CVarSetInteger(CVAR_MINECRAFT("ThirdPersonMouseApplied"), 1);
++                    gui->SaveConsoleVariablesNextFrame();
++                }
++            }
++        }
++    });
++}
++
++static RegisterShipInitFunc sInit(RegisterOverlay, { CVAR_MINECRAFT_ENABLED });
++
++} // namespace
++
++bool HudOverlayActive() {
++    return sTextureValid && OverlayWanted() && sView != nullptr && Field(24) != 0;
++}
++
++} // namespace Minecraft
+diff --git a/soh/soh/Enhancements/Minecraft/MinecraftSteve.cpp b/soh/soh/Enhancements/Minecraft/MinecraftSteve.cpp
+new file mode 100644
+index 0000000..43ea6cb
+--- /dev/null
++++ b/soh/soh/Enhancements/Minecraft/MinecraftSteve.cpp
+@@ -0,0 +1,381 @@
++#include "Minecraft.h"
++#include "Bridge.h"
++
++#include <cmath>
++#include <cstring>
++#include <fstream>
++#include <string>
++#include <vector>
++
++#include <libultraship/libultraship.h>
++#include "soh/frame_interpolation.h"
++
++extern "C" {
++#include "z64.h"
++#include "macros.h"
++#include "functions.h"
++#include "variables.h"
++}
++
++// Steve in place of Link.
++//
++// Link's skeleton is re-proportioned to Minecraft's player model (8px head, 12px body, 12px arms and legs,
++// scaled to Minecraft's player height) by overriding each limb's joint offset, while Link's animations still
++// drive every rotation - so walking, sword swings, climbing, swimming and the ocarina all play on Steve. Each part
++// is a box textured with the player's real Minecraft skin (shared by the hidden Minecraft client, falling back to
++// a built-in Steve palette). Link's hands stay so the sword, shield and items he holds remain visible.
++
++namespace Minecraft {
++
++namespace {
++
++constexpr int kSkin = 64;
++
++alignas(8) uint8_t sSkin[kSkin * kSkin * 4];
++bool sSkinLoaded = false;
++uint32_t sSkinVersion = 0;
++int sSkinCheck = 0;
++
++struct LimbModel {
++    std::vector<Vtx> vtx;
++    std::vector<Gfx> gfx;
++    uint32_t skinVersion = ~0u;
++};
++LimbModel sModels[2][PLAYER_LIMB_MAX]; // [child?][limb]
++
++// ---------------------------------------------------------------------------------------------------------------
++// Skin
++
++void FillRect(int x0, int y0, int w, int h, uint8_t r, uint8_t g, uint8_t b) {
++    for (int y = y0; y < y0 + h; y++)
++        for (int x = x0; x < x0 + w; x++) {
++            uint8_t* p = &sSkin[(y * kSkin + x) * 4];
++            p[0] = r;
++            p[1] = g;
++            p[2] = b;
++            p[3] = 255;
++        }
++}
++
++// A plain Steve-coloured skin, used until Minecraft shares the real one
++void BuildFallbackSkin() {
++    memset(sSkin, 0, sizeof(sSkin));
++    FillRect(0, 0, 32, 16, 0xB7, 0x83, 0x6B);   // head: skin
++    FillRect(8, 0, 8, 8, 0x3A, 0x28, 0x1A);     // top of head: hair
++    FillRect(0, 8, 32, 2, 0x3A, 0x28, 0x1A);    // hair band around the head
++    FillRect(9, 12, 2, 1, 0xFF, 0xFF, 0xFF);    // eyes
++    FillRect(10, 12, 1, 1, 0x4A, 0x3C, 0xA0);
++    FillRect(13, 12, 2, 1, 0xFF, 0xFF, 0xFF);
++    FillRect(13, 12, 1, 1, 0x4A, 0x3C, 0xA0);
++    FillRect(11, 14, 2, 1, 0x6A, 0x40, 0x30);   // mouth
++    FillRect(16, 16, 24, 16, 0x00, 0xA8, 0xA8); // body: shirt
++    FillRect(40, 16, 16, 16, 0x00, 0xA8, 0xA8); // right arm: sleeve
++    FillRect(40, 26, 16, 6, 0xB7, 0x83, 0x6B);  // right forearm: skin
++    FillRect(32, 48, 16, 16, 0x00, 0xA8, 0xA8); // left arm
++    FillRect(32, 58, 16, 6, 0xB7, 0x83, 0x6B);
++    FillRect(0, 16, 16, 16, 0x3A, 0x38, 0xA0);  // right leg: trousers
++    FillRect(0, 29, 16, 3, 0x55, 0x55, 0x55);   // shoes
++    FillRect(16, 48, 16, 16, 0x3A, 0x38, 0xA0); // left leg
++    FillRect(16, 61, 16, 3, 0x55, 0x55, 0x55);
++}
++
++// %TEMP%/oot_mc_skin.bin: "SKIN" u32, version u32, width u32, height u32, then RGBA
++void RefreshSkin() {
++    if (!sSkinLoaded) {
++        BuildFallbackSkin();
++        sSkinLoaded = true;
++    }
++    if ((sSkinCheck++ % 60) != 0) {
++        return;
++    }
++    std::ifstream in(std::string(Bridge::TempDirPath()) + "oot_mc_skin.bin", std::ios::binary);
++    uint32_t header[4] = {};
++    if (!in.read((char*)header, sizeof(header)) || header[0] != 0x4E494B53 || header[2] != kSkin ||
++        header[3] != kSkin || header[1] == sSkinVersion) {
++        return;
++    }
++    std::vector<uint8_t> pixels(sizeof(sSkin));
++    if (in.read((char*)pixels.data(), pixels.size())) {
++        memcpy(sSkin, pixels.data(), sizeof(sSkin));
++        sSkinVersion = header[1];
++    }
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Model
++
++// Directions in a limb's local space for Steve's left (L), up (U) and front (F)
++struct Basis {
++    Vec3f l, u, f;
++};
++// Body and head limbs: bone (+X) points up, Link's left is +Z, front is +Y
++const Basis kUpright = { { 0, 0, 1 }, { 1, 0, 0 }, { 0, 1, 0 } };
++// Arms and legs hang down their bone: up is -X, so front flips to -Y
++const Basis kHanging = { { 0, 0, 1 }, { -1, 0, 0 }, { 0, -1, 0 } };
++
++struct BoxSpec {
++    f32 l0, l1, u0, u1, f0, f1; // pixels, in Steve's (left, up, front) space around the limb origin
++    int tu, tv;                 // skin texture origin of this part (Minecraft's cube UV layout)
++    int w, h, d;                // texture size of the whole part
++    int row0, rows;             // side-texture rows this piece uses (split arms/legs use 0..6 or 6..12)
++};
++
++Vec3f Map(const Basis& b, f32 l, f32 u, f32 f, f32 px) {
++    return { (b.l.x * l + b.u.x * u + b.f.x * f) * px, (b.l.y * l + b.u.y * u + b.f.y * f) * px,
++             (b.l.z * l + b.u.z * u + b.f.z * f) * px };
++}
++
++void AddQuad(std::vector<Vtx>& out, const Basis& b, f32 px, const f32 corners[4][3], const f32 uv[4][2],
++             Vec3f outward) {
++    Vec3f p[4];
++    for (int i = 0; i < 4; i++) {
++        p[i] = Map(b, corners[i][0], corners[i][1], corners[i][2], px);
++    }
++    // Wind counter-clockwise when seen from outside (N64 back-face culling)
++    Vec3f e1 = { p[1].x - p[0].x, p[1].y - p[0].y, p[1].z - p[0].z };
++    Vec3f e2 = { p[2].x - p[0].x, p[2].y - p[0].y, p[2].z - p[0].z };
++    Vec3f n = { e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x };
++    bool flip = n.x * outward.x + n.y * outward.y + n.z * outward.z < 0;
++    for (int k = 0; k < 4; k++) {
++        int i = flip ? 3 - k : k;
++        Vtx v{};
++        v.n.ob[0] = (s16)p[i].x;
++        v.n.ob[1] = (s16)p[i].y;
++        v.n.ob[2] = (s16)p[i].z;
++        v.n.tc[0] = (s16)(uv[i][0] * 32.0f);
++        v.n.tc[1] = (s16)(uv[i][1] * 32.0f);
++        v.n.n[0] = (s8)(outward.x * 120);
++        v.n.n[1] = (s8)(outward.y * 120);
++        v.n.n[2] = (s8)(outward.z * 120);
++        v.n.a = 255;
++        out.push_back(v);
++    }
++}
++
++void AddBox(std::vector<Vtx>& out, const Basis& b, f32 px, const BoxSpec& s) {
++    const f32 l0 = s.l0, l1 = s.l1, u0 = s.u0, u1 = s.u1, f0 = s.f0, f1 = s.f1;
++    const f32 tu = (f32)s.tu, tv = (f32)s.tv, w = (f32)s.w, d = (f32)s.d;
++    const f32 r0 = tv + d + s.row0, r1 = tv + d + s.row0 + s.rows;
++    Vec3f F = Map(b, 0, 0, 1, 1), L = Map(b, 1, 0, 0, 1), U = Map(b, 0, 1, 0, 1);
++    Vec3f nF = { -F.x, -F.y, -F.z }, nL = { -L.x, -L.y, -L.z }, nU = { -U.x, -U.y, -U.z };
++    { // front: Steve's right (l0) on the texture's left
++        f32 c[4][3] = { { l0, u1, f1 }, { l1, u1, f1 }, { l1, u0, f1 }, { l0, u0, f1 } };
++        f32 t[4][2] = { { tu + d, r0 }, { tu + d + w, r0 }, { tu + d + w, r1 }, { tu + d, r1 } };
++        AddQuad(out, b, px, c, t, F);
++    }
++    { // back
++        f32 c[4][3] = { { l1, u1, f0 }, { l0, u1, f0 }, { l0, u0, f0 }, { l1, u0, f0 } };
++        f32 t[4][2] = { { tu + 2 * d + w, r0 }, { tu + 2 * d + 2 * w, r0 }, { tu + 2 * d + 2 * w, r1 },
++                        { tu + 2 * d + w, r1 } };
++        AddQuad(out, b, px, c, t, nF);
++    }
++    { // Steve's right side (-L)
++        f32 c[4][3] = { { l0, u1, f0 }, { l0, u1, f1 }, { l0, u0, f1 }, { l0, u0, f0 } };
++        f32 t[4][2] = { { tu, r0 }, { tu + d, r0 }, { tu + d, r1 }, { tu, r1 } };
++        AddQuad(out, b, px, c, t, nL);
++    }
++    { // Steve's left side (+L)
++        f32 c[4][3] = { { l1, u1, f1 }, { l1, u1, f0 }, { l1, u0, f0 }, { l1, u0, f1 } };
++        f32 t[4][2] = { { tu + d + w, r0 }, { tu + 2 * d + w, r0 }, { tu + 2 * d + w, r1 }, { tu + d + w, r1 } };
++        AddQuad(out, b, px, c, t, L);
++    }
++    { // top
++        f32 c[4][3] = { { l0, u1, f0 }, { l1, u1, f0 }, { l1, u1, f1 }, { l0, u1, f1 } };
++        f32 t[4][2] = { { tu + d, tv }, { tu + d + w, tv }, { tu + d + w, tv + d }, { tu + d, tv + d } };
++        AddQuad(out, b, px, c, t, U);
++    }
++    { // bottom
++        f32 c[4][3] = { { l0, u0, f1 }, { l1, u0, f1 }, { l1, u0, f0 }, { l0, u0, f0 } };
++        f32 t[4][2] = { { tu + d + w, tv }, { tu + d + 2 * w, tv }, { tu + d + 2 * w, tv + d }, { tu + d + w, tv + d } };
++        AddQuad(out, b, px, c, t, nU);
++    }
++}
++
++// Pixel size in model units: Minecraft's player is 32px tall = 1.8 blocks = 54 OoT units (child: 0.72 scale)
++f32 PixelSize(bool child) {
++    return (child ? 0.72f : 1.0f) * 5400.0f / 32.0f;
++}
++
++bool PartFor(s32 limb, BoxSpec& s, const Basis*& basis) {
++    switch (limb) {
++        case PLAYER_LIMB_HEAD:
++            basis = &kUpright;
++            s = { -4, 4, 0, 8, -4, 4, 0, 0, 8, 8, 8, 0, 8 };
++            return true;
++        case PLAYER_LIMB_TORSO:
++            basis = &kUpright;
++            s = { -4, 4, 0, 12, -2, 2, 16, 16, 8, 12, 4, 0, 12 };
++            return true;
++        case PLAYER_LIMB_R_SHOULDER:
++            basis = &kHanging;
++            s = { -2, 2, -4, 2, -2, 2, 40, 16, 4, 12, 4, 0, 6 };
++            return true;
++        case PLAYER_LIMB_R_FOREARM:
++            basis = &kHanging;
++            s = { -2, 2, -6, 0, -2, 2, 40, 16, 4, 12, 4, 6, 6 };
++            return true;
++        case PLAYER_LIMB_L_SHOULDER:
++            basis = &kHanging;
++            s = { -2, 2, -4, 2, -2, 2, 32, 48, 4, 12, 4, 0, 6 };
++            return true;
++        case PLAYER_LIMB_L_FOREARM:
++            basis = &kHanging;
++            s = { -2, 2, -6, 0, -2, 2, 32, 48, 4, 12, 4, 6, 6 };
++            return true;
++        case PLAYER_LIMB_R_THIGH:
++            basis = &kHanging;
++            s = { -2, 2, -6, 0, -2, 2, 0, 16, 4, 12, 4, 0, 6 };
++            return true;
++        case PLAYER_LIMB_R_SHIN:
++            basis = &kHanging;
++            s = { -2, 2, -6, 0, -2, 2, 0, 16, 4, 12, 4, 6, 6 };
++            return true;
++        case PLAYER_LIMB_L_THIGH:
++            basis = &kHanging;
++            s = { -2, 2, -6, 0, -2, 2, 16, 48, 4, 12, 4, 0, 6 };
++            return true;
++        case PLAYER_LIMB_L_SHIN:
++            basis = &kHanging;
++            s = { -2, 2, -6, 0, -2, 2, 16, 48, 4, 12, 4, 6, 6 };
++            return true;
++        default:
++            return false;
++    }
++}
++
++void BuildLimb(LimbModel& m, s32 limb, bool child) {
++    m.vtx.clear();
++    m.gfx.clear();
++    m.skinVersion = sSkinVersion;
++    BoxSpec spec;
++    const Basis* basis = nullptr;
++    if (!PartFor(limb, spec, basis)) {
++        return;
++    }
++    AddBox(m.vtx, *basis, PixelSize(child), spec);
++
++    m.gfx.resize(48);
++    Gfx* g = m.gfx.data();
++    gDPPipeSync(g++);
++    gSPSetGeometryMode(g++, G_LIGHTING | G_SHADE | G_CULL_BACK | G_SHADING_SMOOTH);
++    gSPClearGeometryMode(g++, G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
++    gSPTexture(g++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
++    gDPSetTextureFilter(g++, G_TF_POINT);
++    gDPSetCombineMode(g++, G_CC_MODULATEIDECALA, G_CC_PASS2);
++    gSPInvalidateTexCache(g++, (uintptr_t)sSkin);
++    gDPLoadTextureBlock(g++, (void*)sSkin, G_IM_FMT_RGBA, G_IM_SIZ_32b, kSkin, kSkin, 0, G_TX_NOMIRROR | G_TX_CLAMP,
++                        G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
++    gSPVertex(g++, (uintptr_t)m.vtx.data(), (s32)m.vtx.size(), 0);
++    for (int q = 0; q < 6; q++) {
++        u8 o = (u8)(q * 4);
++        gSP2Triangles(g++, o, o + 1, o + 2, 0, o, o + 2, o + 3, 0);
++    }
++    gDPSetTextureFilter(g++, G_TF_BILERP);
++    gSPEndDisplayList(g++);
++    m.gfx.resize(g - m.gfx.data());
++}
++
++// Joint offsets (model units, in the parent limb's space) for Steve's proportions. Returns false to keep Link's.
++bool SteveJoint(s32 limb, f32 px, Vec3f* pos) {
++    switch (limb) {
++        case PLAYER_LIMB_WAIST:
++        case PLAYER_LIMB_LOWER:
++        case PLAYER_LIMB_UPPER:
++            *pos = { 0, 0, 0 };
++            return true;
++        case PLAYER_LIMB_R_THIGH:
++            *pos = { 0, 0, -2 * px };
++            return true;
++        case PLAYER_LIMB_L_THIGH:
++            *pos = { 0, 0, 2 * px };
++            return true;
++        case PLAYER_LIMB_R_SHIN:
++        case PLAYER_LIMB_L_SHIN:
++        case PLAYER_LIMB_R_FOOT:
++        case PLAYER_LIMB_L_FOOT:
++            *pos = { 6 * px, 0, 0 };
++            return true;
++        case PLAYER_LIMB_HEAD:
++            *pos = { 12 * px, 0, 0 };
++            return true;
++        case PLAYER_LIMB_L_SHOULDER:
++            *pos = { 10 * px, 0, 6 * px };
++            return true;
++        case PLAYER_LIMB_R_SHOULDER:
++            *pos = { 10 * px, 0, -6 * px };
++            return true;
++        case PLAYER_LIMB_L_FOREARM:
++        case PLAYER_LIMB_R_FOREARM:
++            *pos = { 4 * px, 0, 0 };
++            return true;
++        case PLAYER_LIMB_L_HAND:
++        case PLAYER_LIMB_R_HAND:
++            *pos = { 6 * px, 0, 0 };
++            return true;
++        case PLAYER_LIMB_SHEATH:
++            *pos = { 9 * px, -3 * px, 0 }; // across the back
++            return true;
++        default:
++            return false;
++    }
++}
++
++} // namespace
++
++} // namespace Minecraft
++
++extern "C" void Minecraft_OverridePlayerLimb(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos,
++                                             Player* player, s32 isPauseMenu, s32 emptyHand) {
++    using namespace Minecraft;
++    if (!Minecraft_IsEnabled() || dList == nullptr) {
++        return;
++    }
++
++    // In first person Minecraft draws the hand; Link's body must not block the camera
++    if (!isPauseMenu && FirstPersonActive()) {
++        *dList = nullptr;
++        return;
++    }
++    if (!CVarGetInteger(CVAR_MINECRAFT_STEVE, 1) || limbIndex <= 0 || limbIndex >= PLAYER_LIMB_MAX ||
++        player->skelAnime.skeleton == nullptr) {
++        return;
++    }
++
++    bool child = !LINK_IS_ADULT;
++    f32 px = PixelSize(child);
++
++    if (pos != nullptr) {
++        if (limbIndex == PLAYER_LIMB_ROOT) {
++            // Hips at Steve's leg height (12px), keeping the animation's bob, crouch and root motion
++            LodLimb* root = (LodLimb*)SEGMENTED_TO_VIRTUAL(player->skelAnime.skeleton[0]);
++            f32 restHip = root->jointPos.y > 0 ? (f32)root->jointPos.y : 3377.0f;
++            pos->y *= (12.0f * px) / restHip;
++        } else {
++            SteveJoint(limbIndex, px, pos);
++        }
++    }
++
++    switch (limbIndex) {
++        case PLAYER_LIMB_L_HAND:
++        case PLAYER_LIMB_R_HAND:
++            // Steve's arms end in a block, so Link's bare hands go; hands holding something keep the item
++            if (emptyHand) {
++                *dList = nullptr;
++            }
++            return;
++        case PLAYER_LIMB_SHEATH:
++            return; // the sword and shield on the back stay visible
++        default:
++            break;
++    }
++    if (*dList == nullptr) {
++        return;
++    }
++
++    RefreshSkin();
++    LimbModel& m = sModels[child ? 1 : 0][limbIndex];
++    if (m.skinVersion != sSkinVersion) {
++        BuildLimb(m, limbIndex, child);
++    }
++    *dList = m.gfx.empty() ? nullptr : m.gfx.data(); // waist, collar, cap and feet have no Steve part
++}
+diff --git a/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
+new file mode 100644
+index 0000000..c32bbec
+--- /dev/null
++++ b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
+@@ -0,0 +1,1219 @@
++#include "Minecraft.h"
++#include "Bridge.h"
++
++#include <algorithm>
++#include <array>
++#include <climits>
++#include <cmath>
++#include <cstring>
++#include <fstream>
++#include <map>
++#include <memory>
++#include <set>
++#include <string>
++#include <tuple>
++#include <unordered_map>
++#include <unordered_set>
++#include <vector>
++
++#include <libultraship/libultraship.h>
++#include "soh/OTRGlobals.h"
++#include "soh/ResourceManagerHelpers.h"
++#include "soh/ActorDB.h"
++
++extern "C" {
++#include "z64.h"
++#include "macros.h"
++#include "functions.h"
++#include "variables.h"
++extern PlayState* gPlayState;
++}
++
++// Breakable Hyrule, one block at a time.
++//
++// Mining Zelda's own ground "converts" that block: the level's triangles are cut exactly along the block's edges
++// (the visible ones by patching the room display lists, the solid ones by swapping them for clipped copies), and
++// Minecraft puts a real block there, which then mines like any other. Whenever a converted block is mined away,
++// the solid ground around it converts too, so digging always reveals Minecraft blocks (grass, dirt, stone, sand,
++// planks... picked from the surface material) instead of the void behind Zelda's level. Converted blocks are
++// saved per save file and re-cut whenever the scene loads; the blocks themselves live in the Minecraft world.
++// Dungeons and boss rooms can't be dug, so their walls and puzzles keep working.
++
++namespace Minecraft {
++
++namespace {
++
++constexpr u16 kIgnoreAll = 0xE000; // poly flags: ignored by camera, entities and projectiles
++constexpr f32 B = Bridge::UNITS_PER_BLOCK;
++
++using CellKey = std::tuple<int, int, int>; // Minecraft block coordinates
++
++// ---------------------------------------------------------------------------------------------------------------
++// Geometry
++
++struct AttrVtx {
++    f32 p[3];
++    f32 tc[2];
++    f32 cn[4];
++};
++using Poly = std::vector<AttrVtx>;
++
++AttrVtx FromVtx(const Vtx& v) {
++    AttrVtx a;
++    for (int i = 0; i < 3; i++) {
++        a.p[i] = v.v.ob[i];
++    }
++    a.tc[0] = v.v.tc[0];
++    a.tc[1] = v.v.tc[1];
++    for (int i = 0; i < 4; i++) {
++        a.cn[i] = v.v.cn[i];
++    }
++    return a;
++}
++
++Vtx ToVtx(const AttrVtx& a) {
++    Vtx v{};
++    for (int i = 0; i < 3; i++) {
++        v.v.ob[i] = (s16)lroundf(a.p[i]);
++    }
++    v.v.tc[0] = (s16)std::clamp(lroundf(a.tc[0]), -32768L, 32767L);
++    v.v.tc[1] = (s16)std::clamp(lroundf(a.tc[1]), -32768L, 32767L);
++    for (int i = 0; i < 4; i++) {
++        v.v.cn[i] = (u8)std::clamp(lroundf(a.cn[i]), 0L, 255L);
++    }
++    return v;
++}
++
++AttrVtx Lerp(const AttrVtx& a, const AttrVtx& b, f32 t) {
++    AttrVtx r;
++    for (int i = 0; i < 3; i++) {
++        r.p[i] = a.p[i] + (b.p[i] - a.p[i]) * t;
++    }
++    for (int i = 0; i < 2; i++) {
++        r.tc[i] = a.tc[i] + (b.tc[i] - a.tc[i]) * t;
++    }
++    for (int i = 0; i < 4; i++) {
++        r.cn[i] = a.cn[i] + (b.cn[i] - a.cn[i]) * t;
++    }
++    return r;
++}
++
++f32 Area2(const Poly& p) {
++    f32 nx = 0, ny = 0, nz = 0;
++    for (size_t i = 1; i + 1 < p.size(); i++) {
++        f32 ux = p[i].p[0] - p[0].p[0], uy = p[i].p[1] - p[0].p[1], uz = p[i].p[2] - p[0].p[2];
++        f32 vx = p[i + 1].p[0] - p[0].p[0], vy = p[i + 1].p[1] - p[0].p[1], vz = p[i + 1].p[2] - p[0].p[2];
++        nx += uy * vz - uz * vy;
++        ny += uz * vx - ux * vz;
++        nz += ux * vy - uy * vx;
++    }
++    return sqrtf(nx * nx + ny * ny + nz * nz);
++}
++
++struct Box {
++    f32 mn[3], mx[3];
++};
++
++// Split by an axis plane: "out" gets the part where sign * (p - value) <= 0, "keep" the rest
++void Split(const Poly& in, int axis, f32 value, f32 sign, Poly& out, Poly& keep) {
++    out.clear();
++    keep.clear();
++    size_t n = in.size();
++    for (size_t i = 0; i < n; i++) {
++        const AttrVtx& a = in[i];
++        const AttrVtx& b = in[(i + 1) % n];
++        f32 fa = sign * (a.p[axis] - value), fb = sign * (b.p[axis] - value);
++        if (fa <= 0) {
++            out.push_back(a);
++        }
++        if (fa >= 0) {
++            keep.push_back(a);
++        }
++        if ((fa < 0 && fb > 0) || (fa > 0 && fb < 0)) {
++            AttrVtx x = Lerp(a, b, fa / (fa - fb));
++            x.p[axis] = value;
++            out.push_back(x);
++            keep.push_back(x);
++        }
++    }
++}
++
++// The parts of a convex polygon outside a box
++void Subtract(const Poly& in, const Box& b, std::vector<Poly>& result) {
++    Poly cur = in, out, keep;
++    for (int axis = 0; axis < 3; axis++) {
++        for (int side = 0; side < 2; side++) {
++            f32 value = side == 0 ? b.mn[axis] : b.mx[axis];
++            f32 sign = side == 0 ? 1.0f : -1.0f;
++            Split(cur, axis, value, sign, out, keep);
++            if (out.size() >= 3 && Area2(out) > 0.5f) {
++                result.push_back(out);
++            }
++            cur = keep;
++            if (cur.size() < 3 || Area2(cur) <= 0.5f) {
++                return;
++            }
++        }
++    }
++    // what's left is inside the box: removed
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Converted blocks
++
++std::map<int, std::set<CellKey>> sConverted; // scene -> blocks cut out of the level
++int sLoadedFile = -1;
++
++std::string SavePath() {
++    return Ship::Context::GetPathRelativeToAppDirectory("Save/oot_dig_file" + std::to_string(gSaveContext.fileNum + 1) +
++                                                        ".txt");
++}
++
++void LoadConverted() {
++    if (sLoadedFile == gSaveContext.fileNum) {
++        return;
++    }
++    sLoadedFile = gSaveContext.fileNum;
++    sConverted.clear();
++    std::ifstream in(SavePath());
++    int s, x, y, z;
++    while (in >> s >> x >> y >> z) {
++        sConverted[s].insert({ x, y, z });
++    }
++}
++
++bool DiggableScene(int scene) {
++    // Dungeons, boss rooms and Ganon's castle keep their walls (their puzzles and locked doors depend on them)
++    return !(scene <= SCENE_GANONS_TOWER_COLLAPSE_EXTERIOR && scene != SCENE_TREASURE_BOX_SHOP);
++}
++
++Box CellBox(int scene, const CellKey& c) {
++    s16 gridOff = GridYOffset();
++    Box b;
++    b.mn[0] = (std::get<0>(c) - SceneOriginBlocksX(scene)) * B;
++    b.mn[1] = (std::get<1>(c) - Bridge::ORIGIN_Y_BLOCKS) * B + gridOff;
++    b.mn[2] = std::get<2>(c) * B;
++    for (int i = 0; i < 3; i++) {
++        b.mx[i] = b.mn[i] + B;
++        // A hair bigger, so level surfaces lying exactly on a block face (most floors) count as inside it
++        b.mn[i] -= 0.5f;
++        b.mx[i] += 0.5f;
++    }
++    return b;
++}
++
++// Converted blocks touching an axis-aligned range of the level (OoT units)
++void CellsInRange(int scene, const f32 mn[3], const f32 mx[3], std::vector<CellKey>& out) {
++    out.clear();
++    auto it = sConverted.find(scene);
++    if (it == sConverted.end() || it->second.empty()) {
++        return;
++    }
++    s16 gridOff = GridYOffset();
++    int x0 = SceneOriginBlocksX(scene) + (int)floorf((mn[0] - 0.01f) / B);
++    int x1 = SceneOriginBlocksX(scene) + (int)floorf((mx[0] + 0.01f) / B);
++    int y0 = Bridge::ORIGIN_Y_BLOCKS + (int)floorf((mn[1] - gridOff - 0.01f) / B);
++    int y1 = Bridge::ORIGIN_Y_BLOCKS + (int)floorf((mx[1] - gridOff + 0.01f) / B);
++    int z0 = (int)floorf((mn[2] - 0.01f) / B), z1 = (int)floorf((mx[2] + 0.01f) / B);
++    long volume = (long)(x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1);
++    if (volume > (long)it->second.size()) {
++        // The set is ordered by x first: only walk the x range
++        auto from = it->second.lower_bound({ x0, INT_MIN, INT_MIN });
++        auto to = it->second.upper_bound({ x1, INT_MAX, INT_MAX });
++        for (auto c = from; c != to; ++c) {
++            if (std::get<1>(*c) >= y0 && std::get<1>(*c) <= y1 && std::get<2>(*c) >= z0 && std::get<2>(*c) <= z1) {
++                out.push_back(*c);
++            }
++        }
++        return;
++    }
++    for (int x = x0; x <= x1; x++)
++        for (int y = y0; y <= y1; y++)
++            for (int z = z0; z <= z1; z++)
++                if (it->second.count({ x, y, z })) {
++                    out.push_back({ x, y, z });
++                }
++}
++
++// The pieces of a triangle that remain after cutting out every converted block it passes through.
++// Returns false if no converted block touches it.
++bool ClipAgainstCells(int scene, const AttrVtx tri[3], std::vector<Poly>& pieces) {
++    f32 mn[3], mx[3];
++    for (int i = 0; i < 3; i++) {
++        mn[i] = std::min({ tri[0].p[i], tri[1].p[i], tri[2].p[i] });
++        mx[i] = std::max({ tri[0].p[i], tri[1].p[i], tri[2].p[i] });
++    }
++    std::vector<CellKey> cells;
++    CellsInRange(scene, mn, mx, cells);
++    if (cells.empty()) {
++        return false;
++    }
++    pieces.assign(1, Poly{ tri[0], tri[1], tri[2] });
++    bool touched = false;
++    for (const CellKey& c : cells) {
++        Box box = CellBox(scene, c);
++        std::vector<Poly> next;
++        for (const Poly& p : pieces) {
++            size_t before = next.size();
++            Subtract(p, box, next);
++            if (next.size() != before + 1 || next.back().size() != p.size()) {
++                touched = true;
++            }
++        }
++        pieces.swap(next);
++        if (pieces.empty()) {
++            return true;
++        }
++    }
++    return touched;
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Visible level: room display list patches. A triangle command that crosses a converted block is replaced with a
++// call to a generated list that redraws the uncut triangle(s) and the clipped pieces (loaded into vertex slots
++// 32-63, which the level's own lists never use), with the render state the room had at that point.
++
++struct CmdPatch {
++    uintptr_t w0, w1; // the original command
++    std::vector<Vtx> vtx;
++    std::vector<Gfx> gfx;
++};
++std::unordered_map<Gfx*, std::unique_ptr<CmdPatch>> sPatches;
++std::vector<std::unique_ptr<CmdPatch>> sRetired; // display lists already handed to the renderer stay valid
++
++struct CmdTris {
++    Gfx* cmd;
++    int count;
++    int idx[2][3];
++    Vtx v[2][3];
++    bool ok[2];
++};
++
++struct DlWalker {
++    std::vector<CmdTris>& out;
++    std::unordered_set<Gfx*> seen;
++    explicit DlWalker(std::vector<CmdTris>& o) : out(o) {
++    }
++
++    static bool IsPointer(uintptr_t p) {
++        return p >= 0x10000000;
++    }
++    static Gfx* SubDl(uintptr_t p) {
++        if (!IsPointer(p)) {
++            return nullptr;
++        }
++        if (ResourceMgr_OTRSigCheck((char*)p)) {
++            return ResourceMgr_LoadGfxByName((const char*)p);
++        }
++        return (Gfx*)p;
++    }
++    static void* Resolve(uint64_t hash) {
++        return Ship::Context::GetInstance()->GetResourceManager()->GetResourceRawPointer(hash);
++    }
++
++    void Walk(Gfx* dl, int depth) {
++        if (dl == nullptr || depth > 12 || !seen.insert(dl).second) {
++            return;
++        }
++        Vtx buf[64];
++        bool valid[64] = {};
++        auto loadVtx = [&](const Vtx* v, int n, int v0) {
++            for (int i = 0; i < n && v0 + i < 64; i++) {
++                if (v0 + i >= 0) {
++                    buf[v0 + i] = v[i];
++                    valid[v0 + i] = true;
++                }
++            }
++        };
++        auto tri = [&](CmdTris& c, int slot, int a, int b, int d) {
++            c.ok[slot] = a >= 0 && b >= 0 && d >= 0 && a < 64 && b < 64 && d < 64 && valid[a] && valid[b] && valid[d];
++            c.idx[slot][0] = a;
++            c.idx[slot][1] = b;
++            c.idx[slot][2] = d;
++            if (c.ok[slot]) {
++                c.v[slot][0] = buf[a];
++                c.v[slot][1] = buf[b];
++                c.v[slot][2] = buf[d];
++            }
++        };
++        for (Gfx* g = dl; g < dl + 200000; g++) {
++            uintptr_t w0 = g->words.w0, w1 = g->words.w1;
++            auto patched = sPatches.find(g);
++            if (patched != sPatches.end()) {
++                if ((uint8_t)(w0 >> 24) == 0xDE && w1 == (uintptr_t)patched->second->gfx.data()) {
++                    w0 = patched->second->w0; // read the level as it originally was
++                    w1 = patched->second->w1;
++                } else {
++                    sRetired.push_back(std::move(patched->second)); // the resource was reloaded fresh
++                    sPatches.erase(patched);
++                }
++            }
++            uint8_t op = (uint8_t)(w0 >> 24);
++            switch (op) {
++                case 0x01: { // G_VTX
++                    int n = (int)((w0 >> 12) & 0xFF);
++                    if (IsPointer(w1)) {
++                        loadVtx((const Vtx*)w1, n, (int)((w0 >> 1) & 0x7F) - n);
++                    } else {
++                        std::fill(valid, valid + 64, false);
++                    }
++                    break;
++                }
++                case 0x32: { // G_VTX_OTR_HASH (+ hash word)
++                    Gfx* h = g + 1;
++                    const Vtx* v = nullptr;
++                    if (w1 > 0xFFFFF) {
++                        v = (const Vtx*)w1;
++                    } else {
++                        uint64_t hash = ((uint64_t)(uint32_t)h->words.w0 << 32) | (uint32_t)h->words.w1;
++                        char* base = (char*)Resolve(hash);
++                        v = base != nullptr ? (const Vtx*)(base + w1) : nullptr;
++                    }
++                    int n = (int)((w0 >> 12) & 0xFF);
++                    if (v != nullptr) {
++                        loadVtx(v, n, (int)((w0 >> 1) & 0x7F) - n);
++                    } else {
++                        std::fill(valid, valid + 64, false);
++                    }
++                    g++;
++                    break;
++                }
++                case 0x24: // G_VTX_OTR_FILEPATH (+1)
++                    std::fill(valid, valid + 64, false);
++                    g++;
++                    break;
++                case 0x05: { // G_TRI1
++                    CmdTris c{ g, 1 };
++                    tri(c, 0, (int)((w0 >> 16) & 0xFF) / 2, (int)((w0 >> 8) & 0xFF) / 2, (int)(w0 & 0xFF) / 2);
++                    out.push_back(c);
++                    break;
++                }
++                case 0x06: // G_TRI2
++                case 0x07: { // G_QUAD
++                    CmdTris c{ g, 2 };
++                    tri(c, 0, (int)((w0 >> 16) & 0xFF) / 2, (int)((w0 >> 8) & 0xFF) / 2, (int)(w0 & 0xFF) / 2);
++                    tri(c, 1, (int)((w1 >> 16) & 0xFF) / 2, (int)((w1 >> 8) & 0xFF) / 2, (int)(w1 & 0xFF) / 2);
++                    out.push_back(c);
++                    break;
++                }
++                case 0x26: { // G_TRI1_OTR
++                    CmdTris c{ g, 1 };
++                    tri(c, 0, (uint8_t)(w0 & 0xFFFF), (uint8_t)(w1 >> 16), (uint8_t)(w1 & 0xFFFF));
++                    out.push_back(c);
++                    break;
++                }
++                case 0xDE: { // G_DL
++                    bool branch = ((w0 >> 16) & 1) != 0;
++                    Walk(SubDl(w1), depth + 1);
++                    if (branch) {
++                        return;
++                    }
++                    break;
++                }
++                case 0x31: { // G_DL_OTR_HASH (+ hash word)
++                    Gfx* h = g + 1;
++                    uint64_t hash = ((uint64_t)(uint32_t)h->words.w0 << 32) | (uint32_t)h->words.w1;
++                    Walk((Gfx*)Resolve(hash), depth + 1);
++                    g++;
++                    break;
++                }
++                case 0x27: { // G_DL_OTR_FILEPATH
++                    bool branch = ((w0 >> 16) & 1) != 0;
++                    Walk(SubDl(w1), depth + 1);
++                    if (branch) {
++                        return;
++                    }
++                    break;
++                }
++                case 0xDF: // G_ENDDL
++                    return;
++                case 0x20: // G_SETTIMG_OTR_HASH
++                case 0x33: // G_MARKER
++                case 0x35: // G_BRANCH_Z_OTR
++                case 0x36: // G_MTX_OTR
++                case 0x38: // G_FILLWIDERECT
++                case 0x3E: // G_READFB
++                case 0x3F: // G_REGBLENDEDTEX
++                    g++;
++                    break;
++                case 0xE4: // G_TEXRECT
++                case 0xE5: // G_TEXRECTFLIP
++                case 0x37: // G_TEXRECT_WIDE
++                    g += 2;
++                    break;
++                default:
++                    if (op >= 0x20 && op < 0x60 && op != 0x25 && op != 0x28 && op != 0x29 && op != 0x34 &&
++                        op != 0x39 && op != 0x3A && op != 0x3B && op != 0x3D && op != 0x40) {
++                        return; // unknown extended command: stop rather than misread the rest
++                    }
++                    break;
++            }
++        }
++    }
++};
++
++Gfx* RoomDl(Gfx* entry) {
++    return DlWalker::SubDl((uintptr_t)entry);
++}
++
++void GatherRoomTris(PlayState* play, std::vector<CmdTris>& out) {
++    DlWalker walker(out);
++    Room* rooms[2] = { &play->roomCtx.curRoom, &play->roomCtx.prevRoom };
++    for (Room* room : rooms) {
++        if (room->meshHeader == nullptr || room->num < 0) {
++            continue;
++        }
++        MeshHeader* mesh = room->meshHeader;
++        if (mesh->base.type == 0) {
++            PolygonDlist* list = (PolygonDlist*)mesh->polygon0.start;
++            for (int i = 0; list != nullptr && i < mesh->polygon0.num; i++) {
++                walker.Walk(RoomDl(list[i].opa), 0);
++                walker.Walk(RoomDl(list[i].xlu), 0);
++            }
++        } else if (mesh->base.type == 2) {
++            PolygonDlist2* list = (PolygonDlist2*)mesh->polygon2.start;
++            for (int i = 0; list != nullptr && i < mesh->polygon2.num; i++) {
++                walker.Walk(RoomDl(list[i].opa), 0);
++                walker.Walk(RoomDl(list[i].xlu), 0);
++            }
++        }
++    }
++}
++
++void RebuildVisible(PlayState* play) {
++    std::vector<CmdTris> cmds;
++    GatherRoomTris(play, cmds);
++    for (CmdTris& c : cmds) {
++        std::vector<Poly> pieces[2];
++        bool cut[2] = { false, false };
++        for (int s = 0; s < c.count; s++) {
++            if (!c.ok[s]) {
++                continue;
++            }
++            AttrVtx t[3] = { FromVtx(c.v[s][0]), FromVtx(c.v[s][1]), FromVtx(c.v[s][2]) };
++            cut[s] = ClipAgainstCells(play->sceneNum, t, pieces[s]);
++        }
++        auto existing = sPatches.find(c.cmd);
++        if (!cut[0] && !cut[1]) {
++            if (existing != sPatches.end()) { // no longer crosses anything: put the original back
++                c.cmd->words.w0 = existing->second->w0;
++                c.cmd->words.w1 = existing->second->w1;
++                sRetired.push_back(std::move(existing->second));
++                sPatches.erase(existing);
++            }
++            continue;
++        }
++        auto patch = std::make_unique<CmdPatch>();
++        if (existing != sPatches.end()) {
++            patch->w0 = existing->second->w0;
++            patch->w1 = existing->second->w1;
++            sRetired.push_back(std::move(existing->second));
++            sPatches.erase(existing);
++        } else {
++            patch->w0 = c.cmd->words.w0;
++            patch->w1 = c.cmd->words.w1;
++        }
++        // Clipped pieces as a triangle list
++        for (int s = 0; s < c.count; s++) {
++            if (!cut[s]) {
++                continue;
++            }
++            for (const Poly& p : pieces[s]) {
++                for (size_t i = 1; i + 1 < p.size(); i++) {
++                    patch->vtx.push_back(ToVtx(p[0]));
++                    patch->vtx.push_back(ToVtx(p[i]));
++                    patch->vtx.push_back(ToVtx(p[i + 1]));
++                }
++            }
++        }
++        size_t nTris = patch->vtx.size() / 3;
++        patch->gfx.resize(8 + nTris * 2 + (nTris / 10 + 1) * 2);
++        Gfx* g = patch->gfx.data();
++        for (int s = 0; s < c.count; s++) {
++            if (!cut[s] && c.ok[s]) {
++                gSP1Triangle(g++, c.idx[s][0], c.idx[s][1], c.idx[s][2], 0);
++            }
++        }
++        for (size_t t0 = 0; t0 < nTris; t0 += 10) {
++            size_t batch = std::min<size_t>(10, nTris - t0);
++            gSPVertex(g++, (uintptr_t)&patch->vtx[t0 * 3], (s32)(batch * 3), 32);
++            for (size_t k = 0; k < batch; k++) {
++                gSP1Triangle(g++, (s32)(32 + k * 3), (s32)(33 + k * 3), (s32)(34 + k * 3), 0);
++            }
++        }
++        gSPEndDisplayList(g++);
++        patch->gfx.resize(g - patch->gfx.data());
++        c.cmd->words.w1 = (uintptr_t)patch->gfx.data();
++        c.cmd->words.w0 = (uintptr_t)0xDE000000; // G_DL (call)
++        sPatches[c.cmd] = std::move(patch);
++    }
++    if (sRetired.size() > 4096) {
++        sRetired.erase(sRetired.begin(), sRetired.begin() + 2048);
++    }
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// Solid level: static polys crossing converted blocks are switched off and replaced by clipped copies, held by a
++// collision-only actor
++
++struct Piece {
++    Vec3f v[3];
++    CollisionPoly* src;
++};
++std::vector<Piece> sPieces;
++std::vector<Vec3s> sPieceVtx;
++std::vector<CollisionPoly> sPiecePolys;
++CollisionHeader sPieceHeader{};
++bool sPiecesChanged = false;
++s16 sPatchActorId = -1;
++DynaPolyActor* sPatchActor = nullptr;
++
++void ComputeNormal(const Vec3s& a, const Vec3s& b, const Vec3s& c, CollisionPoly& poly) {
++    f32 ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
++    f32 vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
++    f32 nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
++    f32 len = sqrtf(nx * nx + ny * ny + nz * nz);
++    if (len > 0.0f) {
++        nx /= len;
++        ny /= len;
++        nz /= len;
++    }
++    poly.normal.x = COLPOLY_SNORMAL(nx);
++    poly.normal.y = COLPOLY_SNORMAL(ny);
++    poly.normal.z = COLPOLY_SNORMAL(nz);
++    poly.dist = (s16)-(nx * a.x + ny * a.y + nz * a.z);
++}
++
++bool Convertible(PlayState* play, CollisionPoly* p) {
++    return !SurfaceType_IsIgnoredByEntities(&play->colCtx, p, BGCHECK_SCENE) &&
++           SurfaceType_GetSceneExitIndex(&play->colCtx, p, BGCHECK_SCENE) == 0 &&
++           func_80041EA4(&play->colCtx, p, BGCHECK_SCENE) == 0; // void-outs and other special floors stay
++}
++
++void StaticTri(CollisionHeader* col, CollisionPoly* p, AttrVtx out[3]) {
++    const Vec3s* v[3] = { &col->vtxList[COLPOLY_VTX_INDEX(p->flags_vIA)],
++                          &col->vtxList[COLPOLY_VTX_INDEX(p->flags_vIB)], &col->vtxList[COLPOLY_VTX_INDEX(p->vIC)] };
++    for (int k = 0; k < 3; k++) {
++        out[k] = {};
++        out[k].p[0] = v[k]->x;
++        out[k].p[1] = v[k]->y;
++        out[k].p[2] = v[k]->z;
++    }
++}
++
++std::set<CollisionPoly*> sDisabled; // level polys we switched off (only ours get switched back on)
++
++void RebuildSolid(PlayState* play) {
++    CollisionHeader* col = play->colCtx.colHeader;
++    sPieces.clear();
++    if (col == nullptr || col->polyList == nullptr || col->vtxList == nullptr) {
++        return;
++    }
++    for (CollisionPoly* p : sDisabled) {
++        if (p >= col->polyList && p < col->polyList + col->numPolygons) {
++            p->flags_vIA &= ~kIgnoreAll;
++        }
++    }
++    sDisabled.clear();
++    int bigRemoved = 0;
++    for (int i = 0; i < col->numPolygons; i++) {
++        CollisionPoly* p = &col->polyList[i];
++        if (!Convertible(play, p)) {
++            continue;
++        }
++        AttrVtx t[3];
++        StaticTri(col, p, t);
++        std::vector<Poly> pieces;
++        if (!ClipAgainstCells(play->sceneNum, t, pieces)) {
++            continue;
++        }
++        if (pieces.empty() && Area2(Poly{ t[0], t[1], t[2] }) > 4 * B * B) {
++            bigRemoved++; // a big triangle can't fit inside dug blocks: don't lose it
++            continue;
++        }
++        p->flags_vIA |= kIgnoreAll;
++        sDisabled.insert(p);
++        for (const Poly& poly : pieces) {
++            for (size_t k = 1; k + 1 < poly.size(); k++) {
++                Piece pc;
++                const AttrVtx* src[3] = { &poly[0], &poly[k], &poly[k + 1] };
++                for (int j = 0; j < 3; j++) {
++                    pc.v[j] = { src[j]->p[0], src[j]->p[1], src[j]->p[2] };
++                }
++                pc.src = p;
++                sPieces.push_back(pc);
++            }
++        }
++    }
++    // Collision mesh for the patch actor (shared vertices to stay inside the dynapoly budget)
++    sPieceVtx.clear();
++    sPiecePolys.clear();
++    std::map<std::tuple<int, int, int>, u16> index;
++    auto vtx = [&](const Vec3f& p) -> u16 {
++        std::tuple<int, int, int> k{ (int)lroundf(p.x), (int)lroundf(p.y), (int)lroundf(p.z) };
++        auto it = index.find(k);
++        if (it != index.end()) {
++            return it->second;
++        }
++        u16 i = (u16)sPieceVtx.size();
++        sPieceVtx.push_back({ (s16)std::get<0>(k), (s16)std::get<1>(k), (s16)std::get<2>(k) });
++        index[k] = i;
++        return i;
++    };
++    for (const Piece& pc : sPieces) {
++        if (sPieceVtx.size() > 3500 || sPiecePolys.size() > 5000) { // leave room for placed-block chunks
++            break;
++        }
++        u16 a = vtx(pc.v[0]), b = vtx(pc.v[1]), c = vtx(pc.v[2]);
++        if (a == b || b == c || a == c) {
++            continue;
++        }
++        CollisionPoly poly{};
++        poly.type = pc.src->type; // same surface (sounds, material, hookshot, climbing) as the level triangle
++        poly.flags_vIA = a & 0x1FFF;
++        poly.flags_vIB = (b & 0x1FFF) | (pc.src->flags_vIB & 0xE000);
++        poly.vIC = c;
++        ComputeNormal(sPieceVtx[a], sPieceVtx[b], sPieceVtx[c], poly);
++        sPiecePolys.push_back(poly);
++    }
++    sPieceHeader = {};
++    sPieceHeader.minBounds = { -32000, -32000, -32000 };
++    sPieceHeader.maxBounds = { 32000, 32000, 32000 };
++    sPieceHeader.numVertices = (u16)sPieceVtx.size();
++    sPieceHeader.vtxList = sPieceVtx.data();
++    sPieceHeader.numPolygons = (u16)sPiecePolys.size();
++    sPieceHeader.polyList = sPiecePolys.data();
++    sPieceHeader.surfaceTypeList = col->surfaceTypeList;
++    sPieceHeader.cameraDataList = col->cameraDataList;
++    sPieceHeader.cameraDataListLen = col->cameraDataListLen;
++    sPieceHeader.numWaterBoxes = 0;
++    sPieceHeader.waterBoxes = nullptr;
++    sPiecesChanged = true;
++    SPDLOG_INFO("[OoTCraft] dug ground: {} level triangles cut into {} pieces{}", sDisabled.size(), sPieces.size(),
++                bigRemoved ? fmt::format(" ({} kept: cut away entirely?)", bigRemoved) : "");
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++// What the ground is made of at a block
++
++// The nearest level surface straight above a point (or nullptr)
++CollisionPoly* SurfaceAbove(PlayState* play, f32 x, f32 y, f32 z, f32* hitY) {
++    CollisionHeader* col = play->colCtx.colHeader;
++    CollisionPoly* best = nullptr;
++    f32 bestY = 1e30f;
++    for (int i = 0; i < col->numPolygons; i++) {
++        CollisionPoly* p = &col->polyList[i];
++        if (SurfaceType_IsIgnoredByEntities(&play->colCtx, p, BGCHECK_SCENE)) {
++            continue;
++        }
++        f32 ny = COLPOLY_GET_NORMAL(p->normal.y);
++        if (fabsf(ny) < 0.05f) {
++            continue;
++        }
++        const Vec3s& a = col->vtxList[COLPOLY_VTX_INDEX(p->flags_vIA)];
++        const Vec3s& b = col->vtxList[COLPOLY_VTX_INDEX(p->flags_vIB)];
++        const Vec3s& c = col->vtxList[COLPOLY_VTX_INDEX(p->vIC)];
++        f32 d1 = (x - b.x) * (a.z - b.z) - (a.x - b.x) * (z - b.z);
++        f32 d2 = (x - c.x) * (b.z - c.z) - (b.x - c.x) * (z - c.z);
++        f32 d3 = (x - a.x) * (c.z - a.z) - (c.x - a.x) * (z - a.z);
++        bool neg = d1 < 0 || d2 < 0 || d3 < 0, pos = d1 > 0 || d2 > 0 || d3 > 0;
++        if (neg && pos) {
++            continue;
++        }
++        f32 nx = COLPOLY_GET_NORMAL(p->normal.x), nz = COLPOLY_GET_NORMAL(p->normal.z);
++        f32 py = -(nx * x + nz * z + p->dist) / ny;
++        if (py > y && py < bestY) {
++            bestY = py;
++            best = p;
++        }
++    }
++    *hitY = bestY;
++    return best;
++}
++
++// Minecraft blocks the ground turns into (codes understood by the Minecraft side's EV_FILL handler)
++enum FillBlock : u16 {
++    FILL_GRASS = 1, FILL_DIRT, FILL_STONE, FILL_SAND, FILL_SANDSTONE, FILL_PLANKS, FILL_PACKED_ICE, FILL_MAGMA,
++    FILL_NETHERRACK, FILL_FLESH, FILL_RED_WOOL, FILL_COARSE_DIRT, FILL_COAL_ORE, FILL_IRON_ORE, FILL_GOLD_ORE,
++    FILL_REDSTONE_ORE, FILL_LAPIS_ORE, FILL_DIAMOND_ORE, FILL_ANDESITE, FILL_DEEPSLATE, FILL_COPPER_ORE,
++    FILL_BEDROCK, FILL_GRAVEL, FILL_GRANITE, FILL_DIORITE, FILL_TUFF, FILL_DEEPSLATE_IRON, FILL_DEEPSLATE_DIAMOND,
++    FILL_DEEPSLATE_GOLD, FILL_DEEPSLATE_REDSTONE,
++    FILL_CAVE = 0xFFFE, // open cave: ground, but nothing in it
++};
++
++constexpr int kBedrockDepth = 40; // blocks below Hyrule's surface
++
++uint32_t Hash3(int x, int y, int z, uint32_t seed) {
++    uint32_t h = (uint32_t)x * 73856093u ^ (uint32_t)y * 19349663u ^ (uint32_t)z * 83492791u ^ seed * 2654435761u;
++    h = (h ^ (h >> 13)) * 1274126177u;
++    return h ^ (h >> 16);
++}
++
++// Smooth 3D value noise in [0, 1)
++f32 Noise3(f32 x, f32 y, f32 z, uint32_t seed) {
++    int x0 = (int)floorf(x), y0 = (int)floorf(y), z0 = (int)floorf(z);
++    auto smooth = [](f32 t) { return t * t * (3 - 2 * t); };
++    f32 fx = smooth(x - x0), fy = smooth(y - y0), fz = smooth(z - z0);
++    auto v = [&](int dx, int dy, int dz) { return (Hash3(x0 + dx, y0 + dy, z0 + dz, seed) & 0xFFFF) / 65536.0f; };
++    f32 x00 = v(0, 0, 0) + (v(1, 0, 0) - v(0, 0, 0)) * fx, x10 = v(0, 1, 0) + (v(1, 1, 0) - v(0, 1, 0)) * fx;
++    f32 x01 = v(0, 0, 1) + (v(1, 0, 1) - v(0, 0, 1)) * fx, x11 = v(0, 1, 1) + (v(1, 1, 1) - v(0, 1, 1)) * fx;
++    f32 y0v = x00 + (x10 - x00) * fy, y1v = x01 + (x11 - x01) * fy;
++    return y0v + (y1v - y0v) * fz;
++}
++
++// Caves: winding open spaces from a few blocks under the surface down to bedrock
++bool CaveAt(int scene, const CellKey& c, int depth) {
++    if (depth < 5 || depth >= kBedrockDepth - 2) {
++        return false;
++    }
++    f32 x = (f32)std::get<0>(c), y = (f32)std::get<1>(c), z = (f32)std::get<2>(c);
++    f32 n = Noise3(x / 9.0f, y / 5.0f, z / 9.0f, scene * 7 + 1) * 0.65f +
++            Noise3(x / 4.0f, y / 4.0f, z / 4.0f, scene * 7 + 2) * 0.35f;
++    return n > 0.64f;
++}
++
++// Deep underground is a Minecraft world: stone (deepslate further down) with ores, the same every time
++u16 Underground(const CellKey& c, int depth) {
++    int x = std::get<0>(c), y = std::get<1>(c), z = std::get<2>(c);
++    if (depth >= kBedrockDepth) {
++        return FILL_BEDROCK;
++    }
++    bool deep = depth >= 14;
++    // Blobs of other stone, dirt and gravel
++    f32 blob = Noise3(x / 3.0f, y / 3.0f, z / 3.0f, 11);
++    if (blob > 0.78f) {
++        switch (Hash3(x / 4, y / 4, z / 4, 12) % 5) {
++            case 0: return deep ? FILL_TUFF : FILL_DIRT;
++            case 1: return FILL_GRAVEL;
++            case 2: return FILL_GRANITE;
++            case 3: return FILL_DIORITE;
++            default: return FILL_ANDESITE;
++        }
++    }
++    // Ore veins: small clusters, rarer and richer deeper down
++    u32 r = Hash3(x, y, z, 13) % 1000;
++    f32 vein = Noise3(x / 2.0f, y / 2.0f, z / 2.0f, 14);
++    if (vein > 0.6f) {
++        if (r < 90 && depth < 30) return FILL_COAL_ORE;
++        if (r < 150) return deep ? FILL_DEEPSLATE_IRON : FILL_IRON_ORE;
++        if (r < 190 && !deep) return FILL_COPPER_ORE;
++        if (r < 225 && depth >= 8) return deep ? FILL_DEEPSLATE_REDSTONE : FILL_REDSTONE_ORE;
++        if (r < 245 && depth >= 8) return FILL_LAPIS_ORE;
++        if (r < 265 && depth >= 10) return deep ? FILL_DEEPSLATE_GOLD : FILL_GOLD_ORE;
++        if (r < 278 && depth >= 14) return FILL_DEEPSLATE_DIAMOND;
++    }
++    return deep ? FILL_DEEPSLATE : FILL_STONE;
++}
++
++// depth: 0 = right under the surface
++u16 MaterialBlock(u32 material, int depth) {
++    switch (material) {
++        case 0: return depth == 0 ? FILL_COARSE_DIRT : depth < 4 ? FILL_DIRT : FILL_STONE; // dirt paths
++        case 1: return depth == 0 ? FILL_SAND : depth < 4 ? FILL_SANDSTONE : FILL_STONE;
++        case 3: return FILL_FLESH; // inside Jabu-Jabu
++        case 6:
++        case 8: return depth == 0 ? FILL_GRASS : depth < 4 ? FILL_DIRT : FILL_STONE;
++        case 7: return depth == 0 ? FILL_MAGMA : FILL_NETHERRACK;
++        case 9:
++        case 10: return FILL_PLANKS;
++        case 11: return depth < 4 ? FILL_DIRT : FILL_STONE;
++        case 12: return FILL_PACKED_ICE;
++        case 13: return depth == 0 ? FILL_RED_WOOL : FILL_PLANKS;
++        default: return FILL_STONE;
++    }
++}
++
++// Is this block solid ground (under a floor) or does the level's surface pass through it? Returns the block to
++// fill it with, or 0 for open air.
++u16 GroundBlockAt(PlayState* play, const CellKey& c) {
++    Box b = CellBox(play->sceneNum, c);
++    for (int i = 0; i < 3; i++) { // strictly inside: a floor on the block's bottom face doesn't make it ground
++        b.mn[i] += 1.5f;
++        b.mx[i] -= 1.5f;
++    }
++    f32 cx = (b.mn[0] + b.mx[0]) * 0.5f, cy = (b.mn[1] + b.mx[1]) * 0.5f, cz = (b.mn[2] + b.mx[2]) * 0.5f;
++    f32 hitY;
++    CollisionPoly* above = SurfaceAbove(play, cx, cy, cz, &hitY);
++    bool under = above != nullptr && COLPOLY_GET_NORMAL(above->normal.y) > 0 && hitY - cy < 64 * B;
++    // A floor crossing the block also makes it ground (slopes, the block you started digging at)
++    CollisionHeader* col = play->colCtx.colHeader;
++    CollisionPoly* through = nullptr;
++    {
++        for (int i = 0; i < col->numPolygons && through == nullptr; i++) {
++            CollisionPoly* p = &col->polyList[i];
++            if (!Convertible(play, p) || COLPOLY_GET_NORMAL(p->normal.y) < 0.5f) {
++                continue;
++            }
++            AttrVtx t[3];
++            StaticTri(col, p, t);
++            bool overlaps = true;
++            for (int k = 0; k < 3; k++) {
++                f32 mn = std::min({ t[0].p[k], t[1].p[k], t[2].p[k] });
++                f32 mx = std::max({ t[0].p[k], t[1].p[k], t[2].p[k] });
++                overlaps = overlaps && mn < b.mx[k] && mx > b.mn[k];
++            }
++            if (!overlaps) {
++                continue;
++            }
++            std::vector<Poly> rest;
++            Subtract(Poly{ t[0], t[1], t[2] }, b, rest);
++            f32 restArea = 0;
++            for (auto& r : rest) {
++                restArea += Area2(r);
++            }
++            if (restArea < Area2(Poly{ t[0], t[1], t[2] }) - 1.0f) {
++                through = p;
++            }
++        }
++    }
++    if (!under && through == nullptr) {
++        return 0;
++    }
++    // A floor inside the block is its own surface (the top layer); otherwise it's buried under the floor above
++    CollisionPoly* surf = through != nullptr ? through : above;
++    int depth = through != nullptr ? 0 : (int)floorf((hitY - b.mx[1]) / B + 0.05f);
++    depth = std::max(depth, 0);
++    if (depth >= kBedrockDepth) {
++        return FILL_BEDROCK;
++    }
++    if (through == nullptr && CaveAt(play->sceneNum, c, depth)) {
++        return FILL_CAVE;
++    }
++    u16 block = MaterialBlock(func_80041F10(&play->colCtx, surf, BGCHECK_SCENE), depth);
++    return block == FILL_STONE ? Underground(c, depth) : block;
++}
++
++// ---------------------------------------------------------------------------------------------------------------
++
++bool sDirty = false;
++int sReexportIn = 0;
++s8 sLastRooms[2] = { -2, -2 };
++
++std::map<CellKey, u32> sFilledAt; // blocks just filled, until Minecraft's copy of them arrives
++
++bool Convert(PlayState* play, const CellKey& c, u16 fill) {
++    auto& cells = sConverted[play->sceneNum];
++    if (!cells.insert(c).second) {
++        return false;
++    }
++    std::ofstream out(SavePath(), std::ios::app);
++    out << play->sceneNum << ' ' << std::get<0>(c) << ' ' << std::get<1>(c) << ' ' << std::get<2>(c) << '\n';
++    if (fill != 0) {
++        PushFillEvent(std::get<0>(c), std::get<1>(c), std::get<2>(c), fill);
++        sFilledAt[c] = play->gameplayFrames;
++    }
++    SPDLOG_DEBUG("[OoTCraft] dug ({},{},{}) -> block {}", std::get<0>(c), std::get<1>(c), std::get<2>(c), fill);
++    sDirty = true;
++    return true;
++}
++
++void McTerrainPatch_Init(Actor* thisx, PlayState* play) {
++    DynaPolyActor_Init((DynaPolyActor*)thisx, 0);
++    Actor_SetScale(thisx, 1.0f);
++    thisx->room = -1;
++    sPatchActor = (DynaPolyActor*)thisx;
++    sPiecesChanged = true;
++}
++
++void McTerrainPatch_Destroy(Actor* thisx, PlayState* play) {
++    DynaPolyActor* self = (DynaPolyActor*)thisx;
++    if (self->bgId != BGACTOR_NEG_ONE) {
++        DynaPoly_DeleteBgActor(play, &play->colCtx.dyna, self->bgId);
++        self->bgId = BGACTOR_NEG_ONE;
++    }
++    if (sPatchActor == self) {
++        sPatchActor = nullptr;
++    }
++}
++
++void McTerrainPatch_Update(Actor* thisx, PlayState* play) {
++    DynaPolyActor* self = (DynaPolyActor*)thisx;
++    if (!sPiecesChanged) {
++        return;
++    }
++    sPiecesChanged = false;
++    if (self->bgId != BGACTOR_NEG_ONE) {
++        DynaPoly_DeleteBgActor(play, &play->colCtx.dyna, self->bgId);
++        self->bgId = BGACTOR_NEG_ONE;
++    }
++    if (sPieceHeader.numPolygons > 0) {
++        s32 bgId = DynaPoly_SetBgActor(play, &play->colCtx.dyna, thisx, &sPieceHeader);
++        if (bgId != BG_ACTOR_MAX) {
++            self->bgId = bgId;
++        }
++    }
++}
++
++void EnsurePatchActor(PlayState* play) {
++    if (sPatchActor == nullptr && sPatchActorId >= 0 && !sPieces.empty()) {
++        Actor_Spawn(&play->actorCtx, play, sPatchActorId, 0, 0, 0, 0, 0, 0, 0);
++    }
++}
++
++void Rebuild(PlayState* play) {
++    RebuildSolid(play);
++    RebuildVisible(play);
++    EnsurePatchActor(play);
++    sLastRooms[0] = play->roomCtx.curRoom.num;
++    sLastRooms[1] = play->roomCtx.prevRoom.num;
++}
++
++const CellKey kFaces[6] = { { -1, 0, 0 }, { 1, 0, 0 }, { 0, -1, 0 }, { 0, 1, 0 }, { 0, 0, -1 }, { 0, 0, 1 } };
++
++// Broke into a cave: open the whole cave (up to a size), with Minecraft blocks for its walls
++void RevealCave(PlayState* play, const CellKey& start) {
++    auto& done = sConverted[play->sceneNum];
++    std::vector<CellKey> queue{ start };
++    std::set<CellKey> seen{ start };
++    int opened = 0;
++    for (size_t i = 0; i < queue.size() && opened < 700; i++) {
++        const CellKey c = queue[i];
++        if (!done.count(c)) {
++            Convert(play, c, 0);
++        }
++        opened++;
++        for (const CellKey& d : kFaces) {
++            CellKey n{ std::get<0>(c) + std::get<0>(d), std::get<1>(c) + std::get<1>(d), std::get<2>(c) + std::get<2>(d) };
++            if (!seen.insert(n).second || done.count(n)) {
++                continue;
++            }
++            u16 g = GroundBlockAt(play, n);
++            if (g == FILL_CAVE) {
++                queue.push_back(n);
++            } else if (g != 0) {
++                Convert(play, n, g); // cave wall
++            }
++        }
++    }
++    SPDLOG_INFO("[OoTCraft] opened a cave: {} blocks", opened);
++}
++
++std::map<int, std::set<CellKey>> sNotGround; // blocks known to be open air (no need to test again)
++
++u16 GroundBlockCached(PlayState* play, const CellKey& c) {
++    auto& air = sNotGround[play->sceneNum];
++    if (air.count(c)) {
++        return 0;
++    }
++    u16 g = GroundBlockAt(play, c);
++    if (g == 0) {
++        air.insert(c);
++    }
++    return g;
++}
++
++// Make one block of ground real: a Minecraft block, or (in a cave) the whole cave
++void OpenGround(PlayState* play, const CellKey& c, u16 g) {
++    if (g == FILL_CAVE) {
++        RevealCave(play, c);
++    } else if (g != 0) {
++        Convert(play, c, g);
++    }
++}
++
++} // namespace
++
++// The player started mining Zelda's own ground at this block: cut it out of the level and put a real block there
++void CarveTerrain(PlayState* play, int bx, int by, int bz) {
++    if (play == nullptr || !DiggableScene(play->sceneNum)) {
++        return;
++    }
++    MeshHeader* mesh = play->roomCtx.curRoom.meshHeader;
++    if (mesh == nullptr || mesh->base.type == 1) {
++        return; // painted backgrounds can't be cut
++    }
++    LoadConverted();
++    CellKey c{ bx, by, bz };
++    u16 fill = GroundBlockAt(play, c);
++    Convert(play, c, fill != 0 && fill != FILL_CAVE ? fill : MaterialBlock(8, 0));
++}
++
++// A Minecraft block was mined away: if it was part of Hyrule's ground, the ground around it becomes blocks too
++void TerrainBlockBroken(PlayState* play, int bx, int by, int bz) {
++    if (play == nullptr || !DiggableScene(play->sceneNum)) {
++        return;
++    }
++    LoadConverted();
++    auto it = sConverted.find(play->sceneNum);
++    bool dug = it != sConverted.end() && it->second.count({ bx, by, bz });
++    SPDLOG_DEBUG("[OoTCraft] block broken at ({},{},{}), dug ground: {}", bx, by, bz, dug);
++    if (!dug) {
++        return;
++    }
++    for (const CellKey& d : kFaces) {
++        CellKey n{ bx + std::get<0>(d), by + std::get<1>(d), bz + std::get<2>(d) };
++        if (it->second.count(n)) {
++            continue;
++        }
++        OpenGround(play, n, GroundBlockCached(play, n));
++    }
++}
++
++// An explosion (TNT, or one of Zelda's bombs going off in Minecraft too): blow a crater into Hyrule's ground,
++// lined with Minecraft blocks
++void TerrainBlast(PlayState* play, int bx, int by, int bz, float radius) {
++    if (play == nullptr) {
++        return;
++    }
++    s16 gridOff = GridYOffset();
++    Vec3f pos = { (bx - SceneOriginBlocksX(play->sceneNum) + 0.5f) * B,
++                  (by - Bridge::ORIGIN_Y_BLOCKS + 0.5f) * B + gridOff, (bz + 0.5f) * B };
++    Vec3f zero = { 0, 0, 0 };
++    EffectSsBomb2_SpawnLayered(play, &pos, &zero, &zero, 100, 19);
++    SoundSource_PlaySfxAtFixedWorldPos(play, &pos, 10, NA_SE_IT_BOMB_EXPLOSION);
++    if (!DiggableScene(play->sceneNum)) {
++        return;
++    }
++    LoadConverted();
++    f32 r = std::clamp(radius * 0.75f, 1.0f, 6.0f);
++    int reach = (int)ceilf(r + 1.5f);
++    auto& done = sConverted[play->sceneNum];
++    int crater = 0;
++    for (int dx = -reach; dx <= reach; dx++)
++        for (int dy = -reach; dy <= reach; dy++)
++            for (int dz = -reach; dz <= reach; dz++) {
++                f32 d = sqrtf((f32)(dx * dx + dy * dy + dz * dz));
++                if (d > r + 1.5f) {
++                    continue;
++                }
++                CellKey c{ bx + dx, by + dy, bz + dz };
++                if (done.count(c)) {
++                    continue;
++                }
++                u16 ground = GroundBlockAt(play, c);
++                if (ground == 0) {
++                    continue;
++                }
++                bool blown = d <= r;
++                if (blown || ground == FILL_CAVE) {
++                    Convert(play, c, 0); // blown away
++                    crater++;
++                } else {
++                    OpenGround(play, c, ground); // the crater's wall
++                }
++            }
++    SPDLOG_INFO("[OoTCraft] blast at ({},{},{}) r {:.1f}: {} blocks of Hyrule blown away", bx, by, bz, r, crater);
++}
++
++// Scene (re)loaded: cut out everything dug here before (the blocks are already in the Minecraft world)
++void ReplayCarves(PlayState* play) {
++    LoadConverted();
++    sDisabled.clear(); // new scene: its collision is fresh
++    sPatchActor = nullptr; // the old scene's actor is gone
++    sPieces.clear();
++    sPieceHeader = {};
++    Rebuild(play);
++}
++
++// Self-healing: any dug block near Link that is empty in Minecraft (mined, blown up, whatever happened) must have
++// Minecraft blocks, not the void, in the ground around it
++void HealDug(PlayState* play) {
++    static u32 sLast = 0;
++    if (play->gameplayFrames - sLast < 25 || !DiggableScene(play->sceneNum)) {
++        return;
++    }
++    sLast = play->gameplayFrames;
++    auto it = sConverted.find(play->sceneNum);
++    if (it == sConverted.end() || it->second.empty()) {
++        return;
++    }
++    Player* player = GET_PLAYER(play);
++    f32 mn[3], mx[3];
++    for (int i = 0; i < 3; i++) {
++        f32 p = i == 0 ? player->actor.world.pos.x : i == 1 ? player->actor.world.pos.y : player->actor.world.pos.z;
++        mn[i] = p - 40 * B;
++        mx[i] = p + 40 * B;
++    }
++    std::vector<CellKey> nearCells;
++    CellsInRange(play->sceneNum, mn, mx, nearCells);
++    int opened = 0;
++    for (const CellKey& c : nearCells) {
++        if (McBlockAt(play->sceneNum, std::get<0>(c), std::get<1>(c), std::get<2>(c)) != 0) {
++            continue; // a block is there (or Minecraft hasn't sent this part yet)
++        }
++        auto filled = sFilledAt.find(c);
++        if (filled != sFilledAt.end()) {
++            if (play->gameplayFrames - filled->second < 200) {
++                continue; // just filled; Minecraft's copy hasn't arrived yet
++            }
++            sFilledAt.erase(filled);
++        }
++        for (const CellKey& d : kFaces) {
++            CellKey n{ std::get<0>(c) + std::get<0>(d), std::get<1>(c) + std::get<1>(d), std::get<2>(c) + std::get<2>(d) };
++            if (it->second.count(n)) {
++                continue;
++            }
++            u16 g = GroundBlockCached(play, n);
++            if (g != 0) {
++                OpenGround(play, n, g);
++                opened++;
++            }
++        }
++        if (opened > 300) {
++            break;
++        }
++    }
++    if (opened > 0) {
++        SPDLOG_INFO("[OoTCraft] filled in {} blocks of ground around dug-out space", opened);
++    }
++}
++
++void TerrainTick(PlayState* play) {
++    if (play == nullptr) {
++        return;
++    }
++    HealDug(play);
++    if (sDirty) {
++        sDirty = false;
++        Rebuild(play);
++        sReexportIn = 20; // let Minecraft place the blocks before its own collision for this ground goes away
++    } else if (play->roomCtx.curRoom.num != sLastRooms[0] || play->roomCtx.prevRoom.num != sLastRooms[1]) {
++        sLastRooms[0] = play->roomCtx.curRoom.num;
++        sLastRooms[1] = play->roomCtx.prevRoom.num;
++        auto it = sConverted.find(play->sceneNum);
++        if (it != sConverted.end() && !it->second.empty()) {
++            RebuildVisible(play); // a newly loaded room may cross dug blocks
++        }
++    }
++    if (sReexportIn > 0 && --sReexportIn == 0) {
++        ReexportSceneMesh(play);
++    }
++    EnsurePatchActor(play);
++}
++
++// Clipped replacements for the level triangles that cross dug blocks (Minecraft's copy of Hyrule's collision)
++void AppendTerrainPieces(std::vector<TerrainPiece>& out) {
++    for (const Piece& pc : sPieces) {
++        TerrainPiece t;
++        for (int j = 0; j < 3; j++) {
++            t.v[j * 3] = pc.v[j].x;
++            t.v[j * 3 + 1] = pc.v[j].y;
++            t.v[j * 3 + 2] = pc.v[j].z;
++        }
++        t.src = (void*)pc.src;
++        out.push_back(t);
++    }
++}
++
++bool IsTerrainPatchActor(::Actor* actor) {
++    return actor != nullptr && sPatchActorId >= 0 && actor->id == sPatchActorId;
++}
++
++void RegisterTerrainPatchActor() {
++    static ActorDBInit init = {
++        "Mc_TerrainPatch",
++        "Minecraft Dug Ground",
++        ACTORCAT_BG,
++        (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
++        OBJECT_GAMEPLAY_KEEP,
++        sizeof(DynaPolyActor),
++        (ActorFunc)McTerrainPatch_Init,
++        (ActorFunc)McTerrainPatch_Destroy,
++        (ActorFunc)McTerrainPatch_Update,
++        nullptr,
++        nullptr,
++    };
++    sPatchActorId = ActorDB::Instance->AddEntry(init).entry.id;
++}
++
++} // namespace Minecraft
+diff --git a/soh/soh/Enhancements/controls/Mouse.cpp b/soh/soh/Enhancements/controls/Mouse.cpp
+index 3d560bc..e26507f 100644
+--- a/soh/soh/Enhancements/controls/Mouse.cpp
++++ b/soh/soh/Enhancements/controls/Mouse.cpp
+@@ -27,6 +27,11 @@ void Mouse_UpdatePosRel() {
+     mouseCoordRel = GetWindow()->GetMouseDelta();
+ }
+ 
++void Mouse_GetDelta(s32* x, s32* y) {
++    *x = mouseCoordRel.x;
++    *y = mouseCoordRel.y;
++}
++
+ void Mouse_UpdateAll() {
+     Mouse_UpdatePos();
+     Mouse_UpdatePosRel();
+diff --git a/soh/soh/SohGui/SohMenuEnhancements.cpp b/soh/soh/SohGui/SohMenuEnhancements.cpp
+index 4cf7305..a424d2f 100644
+--- a/soh/soh/SohGui/SohMenuEnhancements.cpp
++++ b/soh/soh/SohGui/SohMenuEnhancements.cpp
+@@ -3,6 +3,7 @@
+ #include <soh/Enhancements/mods.h>
+ #include <soh/Enhancements/game-interactor/GameInteractor.h>
+ #include <soh/OTRGlobals.h>
++#include <soh/Enhancements/Minecraft/Minecraft.h>
+ #include <soh/Enhancements/cosmetics/authenticGfxPatches.h>
+ #include <soh/Enhancements/TimeDisplay/TimeDisplay.h>
+ 
+@@ -860,6 +861,21 @@ void SohMenu::AddMenuEnhancements() {
+             "slot to change masks."));
+ 
+     path.column = SECTION_COLUMN_2;
++    AddWidget(path, "Minecraft Mode", WIDGET_SEPARATOR_TEXT);
++    AddWidget(path, "Minecraft Mode", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_MINECRAFT_ENABLED)
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "OoTCraft: play as Steve, with Minecraft running hidden alongside Zelda. WASD/mouse/Space move, look and "
++            "jump; left click mines and attacks (Hyrule's own ground too); right click places, uses items, or talks "
++            "when the A button offers it; R = A button; Enter = Zelda pause menu; E = Minecraft inventory; "
++            "F5 = third person as Link (Zelda controls, F5 again to go back)."));
++    AddWidget(path, "Steve Model", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_MINECRAFT_STEVE)
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip("Draw Link as Steve, with your Minecraft skin"));
++    AddWidget(path, "Start Minecraft Automatically", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_MINECRAFT("AutoLaunch"))
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Launch the hidden Minecraft client (the ootmc folder next to Ship of Harkinian) when it isn't running"));
+     AddWidget(path, "Explosives", WIDGET_SEPARATOR_TEXT);
+     AddWidget(path, "Remote Bombchu", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_ENHANCEMENT("RemoteBombchu"))
+diff --git a/soh/src/code/z_bgcheck.c b/soh/src/code/z_bgcheck.c
+index f0ad285..9e94af2 100644
+--- a/soh/src/code/z_bgcheck.c
++++ b/soh/src/code/z_bgcheck.c
+@@ -1,4 +1,5 @@
+ #include "global.h"
++#include "soh/Enhancements/Minecraft/Minecraft.h"
+ #include "vt.h"
+ 
+ #include "soh/OTRGlobals.h"
+@@ -1612,6 +1613,7 @@ void BgCheck_Allocate(CollisionContext* colCtx, PlayState* play, CollisionHeader
+     colCtx->memSize *= 2;
+     colCtx->dyna.polyListMax *= 2;
+     colCtx->dyna.vtxListMax *= 2;
++    Minecraft_AdjustCollisionLimits(colCtx);
+ 
+     memSize = colCtx->subdivAmount.x * sizeof(StaticLookup) * colCtx->subdivAmount.y * colCtx->subdivAmount.z +
+               colCtx->colHeader->numPolygons * sizeof(u8) + colCtx->dyna.polyNodesMax * sizeof(SSNode) +
+diff --git a/soh/src/code/z_camera.c b/soh/src/code/z_camera.c
+index 0d30dcb..c7c009d 100644
+--- a/soh/src/code/z_camera.c
++++ b/soh/src/code/z_camera.c
+@@ -1,5 +1,6 @@
+ #include <libultraship/libultra.h>
+ #include "global.h"
++#include "soh/Enhancements/Minecraft/Minecraft.h"
+ #include "vt.h"
+ 
+ #include <string.h>
+@@ -7681,6 +7682,12 @@ Vec3s Camera_Update(Camera* camera) {
+         viewFov = camera->fov;
+     }
+ 
++    if (Minecraft_OverrideView(camera, &viewEye, &viewAt, &viewFov)) {
++        OLib_Vec3fDiffToVecSphGeo(&eyeAtAngle, &viewEye, &viewAt);
++        Camera_CalcUpFromPitchYawRoll(&viewUp, eyeAtAngle.pitch, eyeAtAngle.yaw, 0);
++        camera->paramFlags &= ~4;
++    }
++
+     if (camera->paramFlags & 4) {
+         camera->paramFlags &= ~4;
+         viewUp = camera->up;
+diff --git a/soh/src/code/z_player_lib.c b/soh/src/code/z_player_lib.c
+index 34750ed..d9318f2 100644
+--- a/soh/src/code/z_player_lib.c
++++ b/soh/src/code/z_player_lib.c
+@@ -1,4 +1,5 @@
+ #include "global.h"
++#include "soh/Enhancements/Minecraft/Minecraft.h"
+ #include "objects/gameplay_keep/gameplay_keep.h"
+ #include "objects/gameplay_field_keep/gameplay_field_keep.h"
+ #include "objects/object_link_boy/object_link_boy.h"
+@@ -1434,6 +1435,13 @@ s32 Player_OverrideLimbDrawGameplayDefault(PlayState* play, s32 limbIndex, Gfx**
+         }
+     }
+ 
++    Minecraft_OverridePlayerLimb(
++        play, limbIndex, dList, pos, this, false,
++        (limbIndex == PLAYER_LIMB_L_HAND &&
++         (sLeftHandType == PLAYER_MODELTYPE_LH_OPEN || sLeftHandType == PLAYER_MODELTYPE_LH_CLOSED)) ||
++            (limbIndex == PLAYER_LIMB_R_HAND &&
++             (sRightHandType == PLAYER_MODELTYPE_RH_OPEN || sRightHandType == PLAYER_MODELTYPE_RH_CLOSED)));
++
+     if (GameInteractor_InvisibleLinkActive()) {
+         this->actor.shape.shadowDraw = NULL;
+         *dList = NULL;

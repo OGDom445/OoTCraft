@@ -1,0 +1,8 @@
+{
+	"required": true,
+	"package": "com.ootmc.mixin",
+	"compatibilityLevel": "JAVA_21",
+	"mixins": ["ServerLevelMixin", "EntityCollideMixin", "ClimbableMixin", "ExplosionMixin"],
+	"injectors": { "defaultRequire": 1 },
+	"overwrites": { "requireAnnotations": true }
+}

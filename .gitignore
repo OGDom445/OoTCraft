@@ -1,0 +1,17 @@
+# Ship of Harkinian checkout made by scripts/setup.ps1
+/Shipwright/
+
+# Game data: never commit ROMs or extracted assets
+*.z64
+*.n64
+*.v64
+*.o2r
+*.otr
+
+# Minecraft mod build/run output
+ootmc/build/
+ootmc/run/
+ootmc/.gradle/
+ootmc/*.log
+.gradle/
+*.log
