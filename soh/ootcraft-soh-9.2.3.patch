@@ -303,10 +303,10 @@ index 0000000..8cb89ed
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/Minecraft.h b/soh/soh/Enhancements/Minecraft/Minecraft.h
 new file mode 100644
-index 0000000..123a341
+index 0000000..1b3b39f
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/Minecraft.h
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,117 @@
 +#pragma once
 +
 +// "Minecraft Mode": first-person Steve, placeable/breakable blocks and a Minecraft-style HUD layered on top of
@@ -327,8 +327,8 @@ index 0000000..123a341
 +#define CVAR_MINECRAFT_STEVE CVAR_MINECRAFT("Steve")
 +
 +// Extra dynamic collision capacity reserved for block chunks.
-+#define MC_EXTRA_DYNA_POLYS 18000
-+#define MC_EXTRA_DYNA_VTX 10000
++#define MC_EXTRA_DYNA_POLYS 40000
++#define MC_EXTRA_DYNA_VTX 30000
 +
 +#ifdef __cplusplus
 +extern "C" {
@@ -341,8 +341,10 @@ index 0000000..123a341
 +// Called at the end of Camera_Update. Returns true if the view was replaced with the first-person view.
 +s32 Minecraft_OverrideView(void* camera, Vec3f* eye, Vec3f* at, f32* fov);
 +// Called from Player's limb override functions; swaps Link's limbs for Steve's.
-+void Minecraft_OverridePlayerLimb(struct PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos,
++void Minecraft_OverridePlayerLimb(struct PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot,
 +                                  struct Player* player, s32 isPauseMenu, s32 emptyHand);
++// True if (x, z) near the player is dug-out space under solid ground, below a water surface at ySurface.
++s32 Minecraft_SealedFromWater(struct PlayState* play, f32 x, f32 z, f32 ySurface);
 +// Called while the scene collision context is being sized.
 +void Minecraft_AdjustCollisionLimits(void* colCtx);
 +
@@ -424,7 +426,7 @@ index 0000000..123a341
 +#endif
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftBlocks.cpp b/soh/soh/Enhancements/Minecraft/MinecraftBlocks.cpp
 new file mode 100644
-index 0000000..c7756c9
+index 0000000..e29552f
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftBlocks.cpp
 @@ -0,0 +1,809 @@
@@ -957,7 +959,7 @@ index 0000000..c7756c9
 +    if (c->colRegistered || c->actor == nullptr || c->colHeader.numPolygons == 0) {
 +        return;
 +    }
-+    if (sRegisteredVtx + c->colHeader.numVertices > MC_EXTRA_DYNA_VTX - 3600) { // the rest is for dug ground
++    if (sRegisteredVtx + c->colHeader.numVertices > MC_EXTRA_DYNA_VTX - 20000) { // the rest is for dug ground
 +        return; // over budget; chunk stays visible but non-solid until something nearer frees space
 +    }
 +    s32 bgId = DynaPoly_SetBgActor(play, &play->colCtx.dyna, &c->actor->dyna.actor, &c->colHeader);
@@ -2182,10 +2184,10 @@ index 0000000..4ce7f90
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
 new file mode 100644
-index 0000000..7cb9f36
+index 0000000..6cfc010
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
-@@ -0,0 +1,534 @@
+@@ -0,0 +1,543 @@
 +#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -2465,6 +2467,14 @@ index 0000000..7cb9f36
 +        play->msgCtx.msgMode == MSGMODE_NONE && play->pauseCtx.state == 0) {
 +        sLinkMode = !sLinkMode;
 +        player->actor.focus.rot.x = 0; // don't carry Minecraft's last look up/down into third person
++        if (sLinkMode) {
++            // Third person starts right behind Steve, facing where he was looking
++            play->manualCamera = false;
++            f32 s = Math_SinS(player->actor.shape.rot.y), c = Math_CosS(player->actor.shape.rot.y);
++            Vec3f at = { player->actor.world.pos.x, player->actor.world.pos.y + 50.0f, player->actor.world.pos.z };
++            Vec3f eye = { at.x - s * 180.0f, at.y + 30.0f, at.z - c * 180.0f };
++            Play_CameraSetAtEye(play, MAIN_CAM, &at, &eye);
++        }
 +    }
 +    bool mcScreen = mc != nullptr && (mc->flags & Bridge::MC_SCREEN_OPEN);
 +
@@ -2473,6 +2483,7 @@ index 0000000..7cb9f36
 +    Ship::CoordsF wheel = focus ? Window()->GetMouseWheel() : Ship::CoordsF{ 0, 0 };
 +
 +    if (owner == InputOwner::Minecraft) {
++        play->manualCamera = false; // the mouse is Minecraft's: it mustn't swing Zelda's hidden free-look camera
 +        SetCapture(focus && !mcScreen);
 +        int mods = CurrentMods(vk);
 +        for (int i = 8; i < 256; i++) {
@@ -2846,14 +2857,16 @@ index 0000000..1165243
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp b/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp
 new file mode 100644
-index 0000000..511eb72
+index 0000000..c27c4ff
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,267 @@
 +﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
++#include <algorithm>
 +#include <atomic>
++#include <chrono>
 +#include <cstring>
 +#include <memory>
 +#include <string>
@@ -3005,15 +3018,26 @@ index 0000000..511eb72
 +
 +    void DrawElement() override {
 +        // Frame rate log (every 10 s) to keep an eye on performance
-+        static uint32_t sFrames = 0;
-+        static uint64_t sFpsStart = 0;
-+        uint64_t now = GetTickCount64();
++        static uint32_t sFrames = 0, sHitches = 0;
++        static uint64_t sFpsStart = 0, sLastFrame = 0, sWorst = 0;
++        uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
++                           std::chrono::steady_clock::now().time_since_epoch())
++                           .count();
 +        sFrames++;
++        if (sLastFrame != 0) {
++            uint64_t dt = now - sLastFrame;
++            sWorst = std::max(sWorst, dt);
++            sHitches += dt > 25 ? 1 : 0;
++        }
++        sLastFrame = now;
 +        if (sFpsStart == 0) {
 +            sFpsStart = now;
 +        } else if (now - sFpsStart >= 10000) {
-+            SPDLOG_INFO("[OoTCraft] Zelda drawing {:.0f} FPS", sFrames * 1000.0 / (now - sFpsStart));
++            SPDLOG_INFO("[OoTCraft] Zelda drawing {:.0f} FPS, slowest frame {} ms, {} frames over 25 ms",
++                        sFrames * 1000.0 / (now - sFpsStart), sWorst, sHitches);
 +            sFrames = 0;
++            sHitches = 0;
++            sWorst = 0;
 +            sFpsStart = now;
 +        }
 +        PumpInputAtFrameRate();
@@ -3076,11 +3100,11 @@ index 0000000..511eb72
 +                gui->AddGuiWindow(sOverlay);
 +                // Mouse look at Zelda's native 20 FPS feels laggy: draw interpolated frames at the monitor's
 +                // refresh rate (applied once; it can be changed back in Settings > Graphics)
-+                // A fixed 120 FPS: matching a 240 Hz 4K monitor costs more than it looks
-+                if (CVarGetInteger(CVAR_MINECRAFT("PerfDefaultsApplied"), 0) < 2) {
++                // A steady 60 FPS: the same rate as Minecraft's layer, and it divides evenly into 120/144/240 Hz
++                if (CVarGetInteger(CVAR_MINECRAFT("PerfDefaultsApplied"), 0) < 3) {
 +                    CVarSetInteger(CVAR_SETTING("MatchRefreshRate"), 0);
-+                    CVarSetInteger(CVAR_SETTING("InterpolationFPS"), 120);
-+                    CVarSetInteger(CVAR_MINECRAFT("PerfDefaultsApplied"), 2);
++                    CVarSetInteger(CVAR_SETTING("InterpolationFPS"), 60);
++                    CVarSetInteger(CVAR_MINECRAFT("PerfDefaultsApplied"), 3);
 +                    gui->SaveConsoleVariablesNextFrame();
 +                }
 +                // F5 third person is Zelda's camera: let the mouse orbit it
@@ -3106,10 +3130,10 @@ index 0000000..511eb72
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftSteve.cpp b/soh/soh/Enhancements/Minecraft/MinecraftSteve.cpp
 new file mode 100644
-index 0000000..43ea6cb
+index 0000000..a4d8efe
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftSteve.cpp
-@@ -0,0 +1,381 @@
+@@ -0,0 +1,388 @@
 +#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -3436,7 +3460,7 @@ index 0000000..43ea6cb
 +
 +} // namespace Minecraft
 +
-+extern "C" void Minecraft_OverridePlayerLimb(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos,
++extern "C" void Minecraft_OverridePlayerLimb(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot,
 +                                             Player* player, s32 isPauseMenu, s32 emptyHand) {
 +    using namespace Minecraft;
 +    if (!Minecraft_IsEnabled() || dList == nullptr) {
@@ -3466,6 +3490,13 @@ index 0000000..43ea6cb
 +            SteveJoint(limbIndex, px, pos);
 +        }
 +    }
++    if (rot != nullptr && limbIndex == PLAYER_LIMB_HEAD) {
++        // Link's head bone carries a built-in forward/down tilt that his face model hides; on Steve's square head it
++        // reads as staring at the ground. Keep the head turning left/right (rotation about its up axis) and sit it
++        // square on the shoulders otherwise.
++        rot->y = 0;
++        rot->z = 0;
++    }
 +
 +    switch (limbIndex) {
 +        case PLAYER_LIMB_L_HAND:
@@ -3493,16 +3524,18 @@ index 0000000..43ea6cb
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
 new file mode 100644
-index 0000000..f206ef9
+index 0000000..a09bdc3
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
-@@ -0,0 +1,1168 @@
+@@ -0,0 +1,1349 @@
 +#include "Minecraft.h"
 +#include "Bridge.h"
 +
 +#include <algorithm>
 +#include <array>
++#include <chrono>
 +#include <climits>
++#include <deque>
 +#include <cmath>
 +#include <cstring>
 +#include <fstream>
@@ -3979,10 +4012,45 @@ index 0000000..f206ef9
 +    }
 +}
 +
-+void RebuildVisible(PlayState* play) {
-+    std::vector<CmdTris> cmds;
-+    GatherRoomTris(play, cmds);
++std::vector<CellKey> sNewCells; // dug since the last rebuild
++bool TouchesNewCells(int scene, const f32 mn[3], const f32 mx[3]);
++
++// The loaded rooms' triangles, read once per room change (walking every room display list on every dig stutters)
++std::vector<CmdTris> sVisCache;
++int sVisCacheScene = -1;
++s8 sVisCacheRooms[2] = { -2, -2 };
++
++void InvalidateVisibleCache() {
++    sVisCache.clear();
++    sVisCacheScene = -1;
++}
++
++void RebuildVisible(PlayState* play, bool full) {
++    if (sVisCacheScene != play->sceneNum || sVisCacheRooms[0] != play->roomCtx.curRoom.num ||
++        sVisCacheRooms[1] != play->roomCtx.prevRoom.num) {
++        sVisCache.clear();
++        GatherRoomTris(play, sVisCache);
++        full = true; // newly read rooms: check everything
++        sVisCacheScene = play->sceneNum;
++        sVisCacheRooms[0] = play->roomCtx.curRoom.num;
++        sVisCacheRooms[1] = play->roomCtx.prevRoom.num;
++    }
++    std::vector<CmdTris>& cmds = sVisCache;
 +    for (CmdTris& c : cmds) {
++        if (!full) {
++            f32 mn[3] = { 1e30f, 1e30f, 1e30f }, mx[3] = { -1e30f, -1e30f, -1e30f };
++            for (int sl = 0; sl < c.count; sl++) {
++                for (int k = 0; k < 3 && c.ok[sl]; k++) {
++                    for (int a = 0; a < 3; a++) {
++                        mn[a] = std::min(mn[a], (f32)c.v[sl][k].v.ob[a]);
++                        mx[a] = std::max(mx[a], (f32)c.v[sl][k].v.ob[a]);
++                    }
++                }
++            }
++            if (!TouchesNewCells(play->sceneNum, mn, mx)) {
++                continue;
++            }
++        }
 +        std::vector<Poly> pieces[2];
 +        bool cut[2] = { false, false };
 +        for (int s = 0; s < c.count; s++) {
@@ -4060,12 +4128,37 @@ index 0000000..f206ef9
 +    CollisionPoly* src;
 +};
 +std::vector<Piece> sPieces;
-+std::vector<Vec3s> sPieceVtx;
-+std::vector<CollisionPoly> sPiecePolys;
-+CollisionHeader sPieceHeader{};
-+bool sPiecesChanged = false;
++// The clipped pieces of each level triangle that crosses dug blocks (recomputed only when new blocks touch it)
++std::unordered_map<CollisionPoly*, std::vector<Piece>> sPolyPieces;
++
++// Clipped collision is split into one collision actor per 16x16-block area: collision checks skip whole areas
++// by their bounds, and no actor gets near the per-actor vertex limit
++constexpr f32 kGroupSize = 16 * B;
++struct PatchGroup {
++    // Built here, swapped into vtx/polys by the area's actor only after its old collision is unregistered
++    // (Zelda's collision keeps pointers into the live buffers until then)
++    std::vector<Vec3s> pendingVtx;
++    std::vector<CollisionPoly> pendingPolys;
++    std::vector<Vec3s> vtx;
++    std::vector<CollisionPoly> polys;
++    CollisionHeader header{};
++    SurfaceType* surfaceTypes = nullptr;
++    CamData* camData = nullptr;
++    size_t camDataLen = 0;
++    Actor* actor = nullptr;
++    bool changed = false;
++    uint64_t hash = 0;
++};
++std::deque<PatchGroup> sGroups; // a deque: the actors keep pointers to their area's header
++std::map<std::pair<int, int>, int> sGroupIndex;
 +s16 sPatchActorId = -1;
-+DynaPolyActor* sPatchActor = nullptr;
++int sTotalPatchVtx = 0;
++constexpr int kMaxPatchVtx = 20000; // of MC_EXTRA_DYNA_VTX; the rest is for placed-block chunks
++
++typedef struct {
++    DynaPolyActor dyna;
++    s32 group;
++} McTerrainPatchActor;
 +
 +void ComputeNormal(const Vec3s& a, const Vec3s& b, const Vec3s& c, CollisionPoly& poly) {
 +    f32 ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
@@ -4113,21 +4206,34 @@ index 0000000..f206ef9
 +
 +std::set<CollisionPoly*> sDisabled; // level polys switched off for the current scene
 +
-+void RebuildSolid(PlayState* play) {
++bool TouchesNewCells(int scene, const f32 mn[3], const f32 mx[3]) {
++    for (const CellKey& c : sNewCells) {
++        Box b = CellBox(scene, c);
++        if (b.mn[0] <= mx[0] && b.mx[0] >= mn[0] && b.mn[1] <= mx[1] && b.mx[1] >= mn[1] && b.mn[2] <= mx[2] &&
++            b.mx[2] >= mn[2]) {
++            return true;
++        }
++    }
++    return false;
++}
++
++void RebuildSolid(PlayState* play, bool full) {
 +    CollisionHeader* col = play->colCtx.colHeader;
-+    sPieces.clear();
 +    if (col == nullptr || col->polyList == nullptr || col->vtxList == nullptr) {
 +        return;
 +    }
-+    // Switch everything back to how the level had it, then cut again
-+    for (int i = 0; i < col->numPolygons; i++) {
-+        CollisionPoly* p = &col->polyList[i];
-+        auto orig = sOrigFlags.find(p);
-+        if (orig != sOrigFlags.end()) {
-+            p->flags_vIA = (p->flags_vIA & 0x1FFF) | (orig->second & ~0x1FFF);
++    if (full) {
++        // Switch everything back to how the level had it, then cut again
++        for (int i = 0; i < col->numPolygons; i++) {
++            CollisionPoly* p = &col->polyList[i];
++            auto orig = sOrigFlags.find(p);
++            if (orig != sOrigFlags.end()) {
++                p->flags_vIA = (p->flags_vIA & 0x1FFF) | (orig->second & ~0x1FFF);
++            }
 +        }
++        sDisabled.clear();
++        sPolyPieces.clear();
 +    }
-+    sDisabled.clear();
 +    int bigRemoved = 0;
 +    for (int i = 0; i < col->numPolygons; i++) {
 +        CollisionPoly* p = &col->polyList[i];
@@ -4136,6 +4242,16 @@ index 0000000..f206ef9
 +        }
 +        AttrVtx t[3];
 +        StaticTri(col, p, t);
++        if (!full) {
++            f32 mn[3], mx[3];
++            for (int k = 0; k < 3; k++) {
++                mn[k] = std::min({ t[0].p[k], t[1].p[k], t[2].p[k] });
++                mx[k] = std::max({ t[0].p[k], t[1].p[k], t[2].p[k] });
++            }
++            if (!TouchesNewCells(play->sceneNum, mn, mx)) {
++                continue; // nothing new near this triangle: its pieces stand
++            }
++        }
 +        std::vector<Poly> pieces;
 +        if (!ClipAgainstCells(play->sceneNum, t, pieces)) {
 +            continue;
@@ -4147,6 +4263,8 @@ index 0000000..f206ef9
 +        sOrigFlags.emplace(p, p->flags_vIA);
 +        p->flags_vIA |= kIgnoreAll;
 +        sDisabled.insert(p);
++        std::vector<Piece>& out = sPolyPieces[p];
++        out.clear();
 +        for (const Poly& poly : pieces) {
 +            for (size_t k = 1; k + 1 < poly.size(); k++) {
 +                Piece pc;
@@ -4155,56 +4273,90 @@ index 0000000..f206ef9
 +                    pc.v[j] = { src[j]->p[0], src[j]->p[1], src[j]->p[2] };
 +                }
 +                pc.src = p;
-+                sPieces.push_back(pc);
++                out.push_back(pc);
 +            }
 +        }
 +    }
-+    // Collision mesh for the patch actor (shared vertices to stay inside the dynapoly budget)
-+    sPieceVtx.clear();
-+    sPiecePolys.clear();
-+    std::map<std::tuple<int, int, int>, u16> index;
-+    auto vtx = [&](const Vec3f& p) -> u16 {
-+        std::tuple<int, int, int> k{ (int)lroundf(p.x), (int)lroundf(p.y), (int)lroundf(p.z) };
-+        auto it = index.find(k);
-+        if (it != index.end()) {
-+            return it->second;
++
++    // Flatten (Minecraft gets these too) and split into 16x16-block collision areas
++    sPieces.clear();
++    std::map<std::pair<int, int>, std::vector<const Piece*>> byArea;
++    for (auto& [poly, list] : sPolyPieces) {
++        for (const Piece& pc : list) {
++            sPieces.push_back(pc);
++            f32 cx = (pc.v[0].x + pc.v[1].x + pc.v[2].x) / 3.0f, cz = (pc.v[0].z + pc.v[1].z + pc.v[2].z) / 3.0f;
++            byArea[{ (int)floorf(cx / kGroupSize), (int)floorf(cz / kGroupSize) }].push_back(&pc);
 +        }
-+        u16 i = (u16)sPieceVtx.size();
-+        sPieceVtx.push_back({ (s16)std::get<0>(k), (s16)std::get<1>(k), (s16)std::get<2>(k) });
-+        index[k] = i;
-+        return i;
-+    };
-+    for (const Piece& pc : sPieces) {
-+        if (sPieceVtx.size() > 3500 || sPiecePolys.size() > 5000) { // leave room for placed-block chunks
-+            break;
-+        }
-+        u16 a = vtx(pc.v[0]), b = vtx(pc.v[1]), c = vtx(pc.v[2]);
-+        if (a == b || b == c || a == c) {
-+            continue;
-+        }
-+        CollisionPoly poly{};
-+        poly.type = pc.src->type; // same surface (sounds, material, hookshot, climbing) as the level triangle
-+        poly.flags_vIA = a & 0x1FFF;
-+        poly.flags_vIB = (b & 0x1FFF) | (pc.src->flags_vIB & 0xE000);
-+        poly.vIC = c;
-+        ComputeNormal(sPieceVtx[a], sPieceVtx[b], sPieceVtx[c], poly);
-+        sPiecePolys.push_back(poly);
 +    }
-+    sPieceHeader = {};
-+    sPieceHeader.minBounds = { -32000, -32000, -32000 };
-+    sPieceHeader.maxBounds = { 32000, 32000, 32000 };
-+    sPieceHeader.numVertices = (u16)sPieceVtx.size();
-+    sPieceHeader.vtxList = sPieceVtx.data();
-+    sPieceHeader.numPolygons = (u16)sPiecePolys.size();
-+    sPieceHeader.polyList = sPiecePolys.data();
-+    sPieceHeader.surfaceTypeList = col->surfaceTypeList;
-+    sPieceHeader.cameraDataList = col->cameraDataList;
-+    sPieceHeader.cameraDataListLen = col->cameraDataListLen;
-+    sPieceHeader.numWaterBoxes = 0;
-+    sPieceHeader.waterBoxes = nullptr;
-+    sPiecesChanged = true;
-+    SPDLOG_INFO("[OoTCraft] dug ground: {} level triangles cut into {} pieces{}", sDisabled.size(), sPieces.size(),
-+                bigRemoved ? fmt::format(" ({} kept: cut away entirely?)", bigRemoved) : "");
++    for (PatchGroup& g : sGroups) {
++        g.pendingVtx.clear();
++        g.pendingPolys.clear();
++    }
++    sTotalPatchVtx = 0;
++    for (auto& [area, list] : byArea) {
++        auto found = sGroupIndex.find(area);
++        int gi;
++        if (found == sGroupIndex.end()) {
++            gi = (int)sGroups.size();
++            sGroups.emplace_back();
++            sGroupIndex[area] = gi;
++        } else {
++            gi = found->second;
++        }
++        PatchGroup& g = sGroups[gi];
++        std::unordered_map<int64_t, u16> index;
++        auto vtx = [&](const Vec3f& v) -> u16 {
++            int x = (int)lroundf(v.x), y = (int)lroundf(v.y), z = (int)lroundf(v.z);
++            int64_t k = ((int64_t)(x & 0xFFFFF) << 40) | ((int64_t)(y & 0xFFFFF) << 20) | (int64_t)(z & 0xFFFFF);
++            auto it = index.find(k);
++            if (it != index.end()) {
++                return it->second;
++            }
++            u16 i = (u16)g.pendingVtx.size();
++            g.pendingVtx.push_back({ (s16)x, (s16)y, (s16)z });
++            index[k] = i;
++            return i;
++        };
++        for (const Piece* pc : list) {
++            if (g.pendingVtx.size() > 7000 || sTotalPatchVtx + (int)g.pendingVtx.size() > kMaxPatchVtx) {
++                break;
++            }
++            u16 a = vtx(pc->v[0]), b = vtx(pc->v[1]), c = vtx(pc->v[2]);
++            if (a == b || b == c || a == c) {
++                continue;
++            }
++            CollisionPoly poly{};
++            poly.type = pc->src->type; // same surface (sounds, material, hookshot, climbing) as the level triangle
++            poly.flags_vIA = a & 0x1FFF;
++            poly.flags_vIB = (b & 0x1FFF) | (pc->src->flags_vIB & 0xE000);
++            poly.vIC = c;
++            ComputeNormal(g.pendingVtx[a], g.pendingVtx[b], g.pendingVtx[c], poly);
++            g.pendingPolys.push_back(poly);
++        }
++        sTotalPatchVtx += (int)g.pendingVtx.size();
++    }
++    // Only areas whose collision changed get re-registered
++    for (PatchGroup& g : sGroups) {
++        uint64_t h = 1469598103934665603ull;
++        for (const Vec3s& v : g.pendingVtx) {
++            h = (h ^ (uint16_t)v.x) * 1099511628211ull;
++            h = (h ^ (uint16_t)v.y) * 1099511628211ull;
++            h = (h ^ (uint16_t)v.z) * 1099511628211ull;
++        }
++        h ^= g.pendingPolys.size();
++        if (h != g.hash) {
++            g.hash = h;
++            g.changed = true;
++        }
++        g.surfaceTypes = col->surfaceTypeList;
++        g.camData = col->cameraDataList;
++        g.camDataLen = col->cameraDataListLen;
++    }
++    if (full) {
++        SPDLOG_INFO("[OoTCraft] dug ground: {} level triangles cut into {} pieces in {} areas{}", sDisabled.size(),
++                    sPieces.size(), byArea.size(),
++                    bigRemoved ? fmt::format(" ({} kept: cut away entirely?)", bigRemoved) : "");
++    }
 +}
 +
 +// ---------------------------------------------------------------------------------------------------------------
@@ -4363,60 +4515,98 @@ index 0000000..f206ef9
 +        PushFillEvent(std::get<0>(c), std::get<1>(c), std::get<2>(c), fill);
 +        sFilledAt[c] = play->gameplayFrames;
 +    }
++    sNewCells.push_back(c);
 +    SPDLOG_DEBUG("[OoTCraft] dug ({},{},{}) -> block {}", std::get<0>(c), std::get<1>(c), std::get<2>(c), fill);
 +    sDirty = true;
 +    return true;
 +}
 +
 +void McTerrainPatch_Init(Actor* thisx, PlayState* play) {
-+    DynaPolyActor_Init((DynaPolyActor*)thisx, 0);
++    McTerrainPatchActor* self = (McTerrainPatchActor*)thisx;
++    DynaPolyActor_Init(&self->dyna, 0);
 +    Actor_SetScale(thisx, 1.0f);
 +    thisx->room = -1;
-+    sPatchActor = (DynaPolyActor*)thisx;
-+    sPiecesChanged = true;
++    self->group = thisx->params;
++    if (self->group >= 0 && self->group < (s32)sGroups.size()) {
++        sGroups[self->group].actor = thisx;
++        sGroups[self->group].changed = true;
++    }
 +}
 +
 +void McTerrainPatch_Destroy(Actor* thisx, PlayState* play) {
-+    DynaPolyActor* self = (DynaPolyActor*)thisx;
-+    if (self->bgId != BGACTOR_NEG_ONE) {
-+        DynaPoly_DeleteBgActor(play, &play->colCtx.dyna, self->bgId);
-+        self->bgId = BGACTOR_NEG_ONE;
++    McTerrainPatchActor* self = (McTerrainPatchActor*)thisx;
++    if (self->dyna.bgId != BGACTOR_NEG_ONE) {
++        DynaPoly_DeleteBgActor(play, &play->colCtx.dyna, self->dyna.bgId);
++        self->dyna.bgId = BGACTOR_NEG_ONE;
 +    }
-+    if (sPatchActor == self) {
-+        sPatchActor = nullptr;
++    if (self->group >= 0 && self->group < (s32)sGroups.size() && sGroups[self->group].actor == thisx) {
++        sGroups[self->group].actor = nullptr;
 +    }
 +}
 +
 +void McTerrainPatch_Update(Actor* thisx, PlayState* play) {
-+    DynaPolyActor* self = (DynaPolyActor*)thisx;
-+    if (!sPiecesChanged) {
++    McTerrainPatchActor* self = (McTerrainPatchActor*)thisx;
++    if (self->group < 0 || self->group >= (s32)sGroups.size()) {
++        Actor_Kill(thisx);
 +        return;
 +    }
-+    sPiecesChanged = false;
-+    if (self->bgId != BGACTOR_NEG_ONE) {
-+        DynaPoly_DeleteBgActor(play, &play->colCtx.dyna, self->bgId);
-+        self->bgId = BGACTOR_NEG_ONE;
++    PatchGroup& g = sGroups[self->group];
++    if (!g.changed) {
++        return;
 +    }
-+    if (sPieceHeader.numPolygons > 0) {
-+        s32 bgId = DynaPoly_SetBgActor(play, &play->colCtx.dyna, thisx, &sPieceHeader);
++    g.changed = false;
++    if (self->dyna.bgId != BGACTOR_NEG_ONE) {
++        DynaPoly_DeleteBgActor(play, &play->colCtx.dyna, self->dyna.bgId);
++        self->dyna.bgId = BGACTOR_NEG_ONE;
++    }
++    // Old collision is unregistered: now the new buffers can go live
++    g.vtx = g.pendingVtx;
++    g.polys = g.pendingPolys;
++    g.header = {};
++    g.header.minBounds = { -32000, -32000, -32000 };
++    g.header.maxBounds = { 32000, 32000, 32000 };
++    g.header.numVertices = (u16)g.vtx.size();
++    g.header.vtxList = g.vtx.data();
++    g.header.numPolygons = (u16)g.polys.size();
++    g.header.polyList = g.polys.data();
++    g.header.surfaceTypeList = g.surfaceTypes;
++    g.header.cameraDataList = g.camData;
++    g.header.cameraDataListLen = g.camDataLen;
++    if (g.header.numPolygons > 0) {
++        s32 bgId = DynaPoly_SetBgActor(play, &play->colCtx.dyna, thisx, &g.header);
 +        if (bgId != BG_ACTOR_MAX) {
-+            self->bgId = bgId;
++            self->dyna.bgId = bgId;
 +        }
 +    }
 +}
 +
 +void EnsurePatchActor(PlayState* play) {
-+    if (sPatchActor == nullptr && sPatchActorId >= 0 && !sPieces.empty()) {
-+        Actor_Spawn(&play->actorCtx, play, sPatchActorId, 0, 0, 0, 0, 0, 0, 0);
++    if (sPatchActorId < 0) {
++        return;
++    }
++    for (int i = 0; i < (int)sGroups.size(); i++) {
++        if (sGroups[i].actor == nullptr && !sGroups[i].pendingPolys.empty()) {
++            Actor_Spawn(&play->actorCtx, play, sPatchActorId, 0, 0, 0, 0, 0, 0, (s16)i);
++        }
 +    }
 +}
 +
-+void Rebuild(PlayState* play) {
-+    RebuildSolid(play);
-+    RebuildVisible(play);
++void Rebuild(PlayState* play, bool full) {
++    auto t0 = std::chrono::steady_clock::now();
++    RebuildSolid(play, full);
++    auto t1 = std::chrono::steady_clock::now();
++    RebuildVisible(play, full);
++    auto t2 = std::chrono::steady_clock::now();
++    sNewCells.clear();
 +    EnsurePatchActor(play);
 +    sLastRooms[0] = play->roomCtx.curRoom.num;
 +    sLastRooms[1] = play->roomCtx.prevRoom.num;
++    long ms = (long)std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t0).count();
++    if (full || ms > 8) {
++        SPDLOG_INFO("[OoTCraft] dug-ground rebuild ({}): collision {} ms, visible {} ms", full ? "full" : "update",
++                    std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count(),
++                    std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
++    }
 +}
 +
 +const CellKey kFaces[6] = { { -1, 0, 0 }, { 1, 0, 0 }, { 0, -1, 0 }, { 0, 1, 0 }, { 0, 0, -1 }, { 0, 0, 1 } };
@@ -4547,10 +4737,13 @@ index 0000000..f206ef9
 +// Scene (re)loaded: cut out everything dug here before (the blocks are already in the Minecraft world)
 +void ReplayCarves(PlayState* play) {
 +    LoadConverted();
-+    sPatchActor = nullptr; // the old scene's actor is gone
++    InvalidateVisibleCache(); // new scene: its rooms are read fresh
++    sGroups.clear(); // the old scene's collision actors are gone
++    sGroupIndex.clear();
++    sPolyPieces.clear();
 +    sPieces.clear();
-+    sPieceHeader = {};
-+    Rebuild(play);
++    sNewCells.clear();
++    Rebuild(play, true);
 +}
 +
 +// Self-healing: any dug block near Link that is empty in Minecraft (mined, blown up, whatever happened) must have
@@ -4613,14 +4806,14 @@ index 0000000..f206ef9
 +    HealDug(play);
 +    if (sDirty) {
 +        sDirty = false;
-+        Rebuild(play);
++        Rebuild(play, false);
 +        sReexportIn = 20; // let Minecraft place the blocks before its own collision for this ground goes away
 +    } else if (play->roomCtx.curRoom.num != sLastRooms[0] || play->roomCtx.prevRoom.num != sLastRooms[1]) {
 +        sLastRooms[0] = play->roomCtx.curRoom.num;
 +        sLastRooms[1] = play->roomCtx.prevRoom.num;
 +        auto it = sConverted.find(play->sceneNum);
 +        if (it != sConverted.end() && !it->second.empty()) {
-+            RebuildVisible(play); // a newly loaded room may cross dug blocks
++            RebuildVisible(play, true); // a newly loaded room may cross dug blocks
 +        }
 +    }
 +    if (sReexportIn > 0 && --sReexportIn == 0) {
@@ -4654,7 +4847,7 @@ index 0000000..f206ef9
 +        ACTORCAT_BG,
 +        (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
 +        OBJECT_GAMEPLAY_KEEP,
-+        sizeof(DynaPolyActor),
++        sizeof(McTerrainPatchActor),
 +        (ActorFunc)McTerrainPatch_Init,
 +        (ActorFunc)McTerrainPatch_Destroy,
 +        (ActorFunc)McTerrainPatch_Update,
@@ -4665,6 +4858,25 @@ index 0000000..f206ef9
 +}
 +
 +} // namespace Minecraft
++
++extern "C" s32 Minecraft_SealedFromWater(PlayState* play, f32 x, f32 z, f32 ySurface) {
++    using namespace Minecraft;
++    if (play == nullptr || !Minecraft_IsEnabled()) {
++        return false;
++    }
++    auto it = sConverted.find(play->sceneNum);
++    if (it == sConverted.end() || it->second.empty()) {
++        return false; // nothing dug here: Zelda's water is untouched
++    }
++    Player* player = GET_PLAYER(play);
++    if (player == nullptr || fabsf(x - player->actor.world.pos.x) + fabsf(z - player->actor.world.pos.z) > 90.0f) {
++        return false;
++    }
++    // Ground of the original level between Link (head height) and the water surface: he's under the ground
++    f32 hitY;
++    CollisionPoly* above = SurfaceAbove(play, x, player->actor.world.pos.y + 40.0f, z, &hitY);
++    return above != nullptr && COLPOLY_GET_NORMAL(above->normal.y) > 0 && hitY < ySurface;
++}
 diff --git a/soh/soh/Enhancements/controls/Mouse.cpp b/soh/soh/Enhancements/controls/Mouse.cpp
 index 3d560bc..e26507f 100644
 --- a/soh/soh/Enhancements/controls/Mouse.cpp
@@ -4716,7 +4928,7 @@ index 4cf7305..a424d2f 100644
      AddWidget(path, "Remote Bombchu", WIDGET_CVAR_CHECKBOX)
          .CVar(CVAR_ENHANCEMENT("RemoteBombchu"))
 diff --git a/soh/src/code/z_bgcheck.c b/soh/src/code/z_bgcheck.c
-index f0ad285..9e94af2 100644
+index f0ad285..97780f0 100644
 --- a/soh/src/code/z_bgcheck.c
 +++ b/soh/src/code/z_bgcheck.c
 @@ -1,4 +1,5 @@
@@ -4733,6 +4945,19 @@ index f0ad285..9e94af2 100644
  
      memSize = colCtx->subdivAmount.x * sizeof(StaticLookup) * colCtx->subdivAmount.y * colCtx->subdivAmount.z +
                colCtx->colHeader->numPolygons * sizeof(u8) + colCtx->dyna.polyNodesMax * sizeof(SSNode) +
+@@ -4215,7 +4217,11 @@ s32 WaterBox_GetSurface1(PlayState* play, CollisionContext* colCtx, f32 x, f32 z
+             return true;
+         }
+     }
+-    return WaterBox_GetSurfaceImpl(play, colCtx, x, z, ySurface, outWaterBox);
++    if (!WaterBox_GetSurfaceImpl(play, colCtx, x, z, ySurface, outWaterBox)) {
++        return false;
++    }
++    // OoTCraft: Hyrule's water stops at its ground; dug-out space under a pond or stream is dry
++    return !Minecraft_SealedFromWater(play, x, z, *ySurface);
+ }
+ 
+ /**
 diff --git a/soh/src/code/z_camera.c b/soh/src/code/z_camera.c
 index 0d30dcb..c7c009d 100644
 --- a/soh/src/code/z_camera.c
@@ -4758,7 +4983,7 @@ index 0d30dcb..c7c009d 100644
          camera->paramFlags &= ~4;
          viewUp = camera->up;
 diff --git a/soh/src/code/z_player_lib.c b/soh/src/code/z_player_lib.c
-index 34750ed..d9318f2 100644
+index 34750ed..d146293 100644
 --- a/soh/src/code/z_player_lib.c
 +++ b/soh/src/code/z_player_lib.c
 @@ -1,4 +1,5 @@
@@ -4772,7 +4997,7 @@ index 34750ed..d9318f2 100644
      }
  
 +    Minecraft_OverridePlayerLimb(
-+        play, limbIndex, dList, pos, this, false,
++        play, limbIndex, dList, pos, rot, this, false,
 +        (limbIndex == PLAYER_LIMB_L_HAND &&
 +         (sLeftHandType == PLAYER_MODELTYPE_LH_OPEN || sLeftHandType == PLAYER_MODELTYPE_LH_CLOSED)) ||
 +            (limbIndex == PLAYER_LIMB_R_HAND &&

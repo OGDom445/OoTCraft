@@ -277,9 +277,32 @@ public class OotMc implements ModInitializer {
                         budget--;
                     }
                 }
+        // Farther out (the whole area Zelda shows in third person): only sections with blocks in them, so dug ground
+        // and builds across the area are drawn, not holes. Checked once a second.
+        if (budget > 0 && ++farScanTick >= 20) {
+            farScanTick = 0;
+            for (int dy = -4; dy <= 3 && budget > 0; dy++)
+                for (int dz = -6; dz <= 6 && budget > 0; dz++)
+                    for (int dx = -6; dx <= 6 && budget > 0; dx++) {
+                        if (Math.abs(dx) <= 2 && Math.abs(dz) <= 2 && Math.abs(dy) <= 2) continue;
+                        int sx = lx + dx, sy = ly + dy, sz = lz + dz;
+                        long key = sectionKey(sx, sy, sz);
+                        boolean dirty = DIRTY_SECTIONS.remove(key);
+                        if (!dirty && sentSections.contains(key)) continue;
+                        if (sy < level.getMinSection() || sy >= level.getMaxSection()) continue;
+                        LevelChunk chunk = level.getChunk(sx, sz);
+                        int idx = chunk.getSectionIndexFromSectionY(sy);
+                        if (!dirty && chunk.getSections()[idx].hasOnlyAir()) continue;
+                        publish(bridge, level, link.scene(), sx, sy, sz);
+                        sentSections.add(key);
+                        budget--;
+                    }
+        }
         DIRTY_SECTIONS.forEach(sentSections::remove);
         DIRTY_SECTIONS.clear();
     }
+
+    private int farScanTick = 0;
 
     /** Keep one invisible stand-in per nearby Zelda actor, matching its position and hitbox. */
     private void syncProxies(ServerLevel level, Bridge bridge, int scene) {

@@ -139,6 +139,7 @@ public final class CollisionField {
         Mesh m = mesh;
         if (m != null && m.scene == scene && meshVersion == loadedMeshVersion) return;
         if (m != null && m.scene == scene && System.currentTimeMillis() < holdReloadUntil) return;
+        long started = System.nanoTime();
         Path file = Path.of(System.getProperty("java.io.tmpdir"), "oot_mc_mesh_" + scene + ".bin");
         if (!Files.exists(file)) return;
         try {
@@ -196,8 +197,8 @@ public final class CollisionField {
             cache.clear();
             mesh = nm;
             loadedMeshVersion = meshVersion;
-            OotMc.LOGGER.info("Collision field for scene {}: {} triangles, {} sections, {} water boxes", scene, count,
-                nm.buckets.size(), waterCount);
+            OotMc.LOGGER.info("Collision field for scene {}: {} triangles, {} sections, {} water boxes ({} ms)", scene,
+                count, nm.buckets.size(), waterCount, (System.nanoTime() - started) / 1_000_000);
         } catch (IOException e) {
             OotMc.LOGGER.error("Reading collision mesh for scene {}", scene, e);
         }
