@@ -16,7 +16,7 @@ OoTCraft runs Minecraft Java Edition 1.21 and [Ship of Harkinian](https://github
 |---|---|
 | **Steve in Hyrule** | Link is drawn as Steve with your Minecraft skin. First person uses Minecraft's camera, hand and HUD. |
 | **Blocks** | Place any Minecraft block in Hyrule. Zelda draws it with Minecraft's real textures (any resource pack) and gives it real collision, so Link can stand on it, hookshot to wood, and so on. |
-| **Breakable Hyrule** | Mining Zelda's ground cuts out exactly that block of the level and replaces it with the matching Minecraft block (grass, dirt, sand, stone, planks…). Dig down through dirt and stone into deepslate, ores (coal, iron, copper, gold, redstone, lapis, diamond), gravel, granite and diorite, with caves along the way and bedrock at the bottom. Mined blocks drop as items. Digs are saved per save file. Dungeons and boss rooms can't be dug, so their puzzles still work. |
+| **Breakable Hyrule** | Mining Zelda's ground cuts out exactly that block of the level and replaces it with the matching Minecraft block (grass, dirt, sand, stone, planks…). Below the top layers is **real Minecraft 1.21 world generation** (a hidden vanilla overworld with the same seed, aligned under each area): stone and deepslate, every ore, dirt/gravel/granite/diorite/andesite/tuff pockets, caves and aquifers, dungeons with chests, mineshafts, amethyst geodes, trial chambers, ancient cities, and bedrock at the bottom. Break into a cave and it opens up as you explore. Mined blocks drop as items. Digs are saved per save file. Zelda's own dungeons and boss rooms can't be dug, so their puzzles still work. Run `/ootcore` in Minecraft's chat to see what's under you. |
 | **TNT** | Explosions blow craters into Hyrule's ground, lined with Minecraft blocks. Zelda's own bombs do too. |
 | **Combat** | Minecraft weapons hit Zelda enemies as Zelda attacks (sword, arrows, fire, explosions), so enemies with special weak points still work. Zelda damage hurts Steve. |
 | **Zelda items** | Every item Link owns appears in Steve's inventory. The hookshot and longshot are real grapples in Minecraft. Bombs throw real Zelda bombs. Everything else (ocarina, slingshot, boomerang, magic, bottles, hammer, lens, masks, trade items) hands control to Link to use it. |
@@ -95,7 +95,7 @@ The Zelda side lives in `soh/soh/Enhancements/Minecraft/` (after the patch is ap
 - Windows only.
 - Items that need aiming or careful timing (slingshot, boomerang, hookshot targets in dungeons, ocarina songs) are used as Link in third person, not in Minecraft's first person.
 - Hyrule's ground is cut a block at a time, but pre-rendered rooms (houses, shops, Castle Town Market) are painted backgrounds and can't be dug.
-- Minecraft mobs, dropped items and particles aren't drawn in Zelda's view; drops fly straight into your inventory.
+- Minecraft mobs, dropped items and particles aren't drawn in Zelda's view; drops fly straight into your inventory, and spawners in underground dungeons stay dormant.
 - Inside dungeons and boss rooms, digging is turned off on purpose.
 
 ## Credits and license

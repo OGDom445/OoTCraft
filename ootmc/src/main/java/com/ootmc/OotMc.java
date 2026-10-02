@@ -86,6 +86,21 @@ public class OotMc implements ModInitializer {
         net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents.AFTER_RESPAWN.register((oldPlayer, newPlayer, alive) ->
             newPlayer.server.execute(() -> sendToHyrule(newPlayer)));
         ZeldaItems.register();
+        // Proof of what's under Hyrule: a core sample under Kokiri Forest on every start, and /ootcore for anywhere
+        net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents.SERVER_STARTED.register(server ->
+            {
+                LOGGER.info("[OoTCraft] {}", Underground.coreSample(server, Bridge.originX(85) - 2, 28));
+                LOGGER.info("[OoTCraft] {}", Underground.featureScan(server, Bridge.originX(85) - 2, 28, 4));
+            });
+        net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback.EVENT.register((dispatcher, access, env) ->
+            dispatcher.register(net.minecraft.commands.Commands.literal("ootcore").executes(ctx -> {
+                var src = ctx.getSource();
+                var pos = net.minecraft.core.BlockPos.containing(src.getPosition());
+                String msg = Underground.coreSample(src.getServer(), pos.getX(), pos.getZ());
+                src.sendSuccess(() -> net.minecraft.network.chat.Component.literal(msg), false);
+                LOGGER.info("[OoTCraft] {}", msg);
+                return 1;
+            })));
         LOGGER.info("OoTCraft loaded");
     }
 
@@ -216,8 +231,17 @@ public class OotMc implements ModInitializer {
                 case Bridge.EV_FILL -> {
                     // Hyrule ground the player started mining becomes real blocks (no physics: sand stays put)
                     BlockState cur = level.getBlockState(pos);
-                    BlockState fill = fillBlock(ev.blockId);
-                    if (fill != null && (cur.isAir() || cur.is(WATER_VOLUME))) level.setBlock(pos, fill, Block.UPDATE_CLIENTS);
+                    if (cur.isAir() || cur.is(WATER_VOLUME)) {
+                        if (ev.blockId == 100) {
+                            // Deeper down: the real 1.21 underground
+                            if (!Underground.fill(level, pos, ev.radius)) {
+                                bridge.pushEvent(Bridge.EV_CELL_AIR, pos.getX(), pos.getY(), pos.getZ());
+                            }
+                        } else {
+                            BlockState fill = fillBlock(ev.blockId);
+                            if (fill != null) level.setBlock(pos, fill, Block.UPDATE_CLIENTS);
+                        }
+                    }
                     CollisionField.holdReloadUntil = System.currentTimeMillis() + 750;
                 }
                 case Bridge.EV_EXPLOSION -> level.explode(null, ev.x + 0.5, ev.y + 0.5, ev.z + 0.5, ev.radius, Level.ExplosionInteraction.TNT);

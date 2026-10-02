@@ -35,7 +35,7 @@ public final class Bridge {
     public static final int EV_KEY = 10, EV_MOUSE_BUTTON = 11, EV_CHAR = 12, EV_GIVE_ITEM = 20;
     public static final int EV_PLAYER_HURT = 21, EV_PLAYER_HEAL = 22, EV_NUDGE = 23, EV_FILL = 4;
     public static final int EV_PLAYER_DIED = 40, EV_HIT_ACTOR = 41, EV_CARVE = 42, EV_BLOCK_BROKEN = 43, EV_BLAST = 44,
-        EV_USE_ZELDA_ITEM = 45, EV_VOID_OUT = 46;
+        EV_USE_ZELDA_ITEM = 45, EV_VOID_OUT = 46, EV_CELL_AIR = 47;
 
     // LinkState flags
     public static final int LINK_FROZEN = 1, LINK_HANDOFF = 2, LINK_ZELDA_INPUT = 4, LINK_IN_PLAY = 8;

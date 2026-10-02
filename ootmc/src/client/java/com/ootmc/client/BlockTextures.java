@@ -127,6 +127,16 @@ public final class BlockTextures {
         AABB box = !shape.isEmpty() ? shape.bounds() : collides ? col.bounds() : new AABB(0, 0, 0, 1, 1, 1);
         boolean flat = box.maxY - box.minY <= 0.2;
         int kind = collides || flat ? KIND_BOX : KIND_CROSS;
+        if (s.getBlock() instanceof net.minecraft.world.level.block.LiquidBlock) {
+            // Water and lava: a full see-through block with the still texture (lava glows, water gets its blue)
+            boolean water = s.getFluidState().is(net.minecraft.tags.FluidTags.WATER);
+            int[] tex = new int[256];
+            blit(tex, mc.getBlockRenderer().getBlockModelShaper().getParticleIcon(s), water ? 0x3F76E4 : -1);
+            if (water) for (int i = 0; i < 256; i++) tex[i] = (tex[i] & 0x00FFFFFF) | (0xA0 << 24);
+            int[][] faces = { tex, tex, tex, tex, tex, tex };
+            writeEntry(id, KIND_BOX, water ? FLAG_CUTOUT : 0, new AABB(0, 0, 0, 1, 0.875, 1), faces);
+            return;
+        }
 
         BakedModel model = mc.getBlockRenderer().getBlockModel(s);
         RandomSource rnd = RandomSource.create(42L);

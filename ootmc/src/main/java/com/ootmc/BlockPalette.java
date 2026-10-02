@@ -26,8 +26,9 @@ public final class BlockPalette {
 
     public static short toId(BlockState s, BlockGetter level, BlockPos pos) {
         if (s.isAir() || s.is(OotMc.WATER_VOLUME)) return AIR;
-        if (s.getRenderShape() == RenderShape.INVISIBLE) return AIR; // barriers, light blocks
-        if (s.getBlock() instanceof LiquidBlock) return AIR;          // Hyrule draws its own water
+        // Barriers and light blocks are invisible; water and lava (caves, aquifers) are drawn even though their
+        // render shape is a fluid, not a model
+        if (s.getRenderShape() == RenderShape.INVISIBLE && !(s.getBlock() instanceof LiquidBlock)) return AIR;
         int id = Block.getId(s);
         if (id <= 0 || id > 0xFFFF) return AIR;
         if (REQUESTED.add(id)) PENDING.add(id);

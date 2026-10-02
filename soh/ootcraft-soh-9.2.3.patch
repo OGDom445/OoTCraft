@@ -20,10 +20,10 @@ index 70ea296..ae67cb3 100644
  extern "C" ActorDBEntry* ActorDB_Retrieve(const int id) {
 diff --git a/soh/soh/Enhancements/Minecraft/Bridge.h b/soh/soh/Enhancements/Minecraft/Bridge.h
 new file mode 100644
-index 0000000..fafb502
+index 0000000..8cb89ed
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/Bridge.h
-@@ -0,0 +1,276 @@
+@@ -0,0 +1,277 @@
 +#pragma once
 +
 +// OoTCraft shared-memory bridge between Ship of Harkinian and the hidden Minecraft client ("ootmc" Fabric mod).
@@ -74,6 +74,7 @@ index 0000000..fafb502
 +    EV_BLAST = 44,        // x, y, z = explosion centre (Minecraft block), radius = blocks * 10
 +    EV_USE_ZELDA_ITEM = 45, // x = OoT item id: Steve used the Minecraft version of a Zelda item
 +    EV_VOID_OUT = 46,       // Steve fell out of the world: respawn at the entrance, like falling into a pit
++    EV_CELL_AIR = 47,       // x, y, z = a dug block turned out to be open air underground (cave, mineshaft...)
 +};
 +
 +enum HitKind : int32_t {
@@ -302,10 +303,10 @@ index 0000000..fafb502
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/Minecraft.h b/soh/soh/Enhancements/Minecraft/Minecraft.h
 new file mode 100644
-index 0000000..c3be5eb
+index 0000000..123a341
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/Minecraft.h
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,115 @@
 +#pragma once
 +
 +// "Minecraft Mode": first-person Steve, placeable/breakable blocks and a Minecraft-style HUD layered on top of
@@ -384,6 +385,7 @@ index 0000000..c3be5eb
 +void TerrainTick(PlayState* play);
 +void TerrainBlockBroken(PlayState* play, int bx, int by, int bz);
 +void TerrainBlast(PlayState* play, int bx, int by, int bz, float radius);
++void TerrainCellAir(PlayState* play, int bx, int by, int bz);
 +void SyncZeldaItems(PlayState* play);
 +void UseZeldaItem(PlayState* play, int item);
 +void RequestItemHandoff(PlayState* play, int slot, int item);
@@ -1237,10 +1239,10 @@ index 0000000..c7756c9
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
 new file mode 100644
-index 0000000..94833b1
+index 0000000..1a3ccca
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
-@@ -0,0 +1,629 @@
+@@ -0,0 +1,637 @@
 +﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -1585,6 +1587,9 @@ index 0000000..94833b1
 +            case Bridge::EV_USE_ZELDA_ITEM:
 +                UseZeldaItem(play, e.x);
 +                break;
++            case Bridge::EV_CELL_AIR:
++                TerrainCellAir(play, e.x, e.y, e.z);
++                break;
 +            case Bridge::EV_VOID_OUT:
 +                if (play->transitionTrigger == TRANS_TRIGGER_OFF && play->transitionMode == TRANS_MODE_OFF) {
 +                    Play_TriggerVoidOut(play);
@@ -1836,7 +1841,12 @@ index 0000000..94833b1
 +    e.x = x;
 +    e.y = y;
 +    e.z = z;
-+    e.blockId = block;
++    if (block & 0x8000) { // real Minecraft underground: block 100, depth below Hyrule's surface in radius
++        e.blockId = 100;
++        e.radius = block & 0x7FFF;
++    } else {
++        e.blockId = block;
++    }
 +    e.sceneId = gPlayState->sceneNum;
 +    Bridge::Push(L->ootToMc, e);
 +}
@@ -3483,10 +3493,10 @@ index 0000000..43ea6cb
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
 new file mode 100644
-index 0000000..7a647d1
+index 0000000..f206ef9
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
-@@ -0,0 +1,1233 @@
+@@ -0,0 +1,1168 @@
 +#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -4242,71 +4252,21 @@ index 0000000..7a647d1
 +    FILL_REDSTONE_ORE, FILL_LAPIS_ORE, FILL_DIAMOND_ORE, FILL_ANDESITE, FILL_DEEPSLATE, FILL_COPPER_ORE,
 +    FILL_BEDROCK, FILL_GRAVEL, FILL_GRANITE, FILL_DIORITE, FILL_TUFF, FILL_DEEPSLATE_IRON, FILL_DEEPSLATE_DIAMOND,
 +    FILL_DEEPSLATE_GOLD, FILL_DEEPSLATE_REDSTONE,
-+    FILL_CAVE = 0xFFFE, // open cave: ground, but nothing in it
 +};
 +
-+constexpr int kBedrockDepth = 40; // blocks below Hyrule's surface
++// Below the top layers, the ground is real Minecraft 1.21 world generation: Minecraft copies whatever a vanilla
++// overworld has that far under its own surface (stone, deepslate, ores, caves, aquifers, dungeons, mineshafts,
++// geodes, trial chambers, ancient cities...). Encoded as this flag plus the depth below Hyrule's surface.
++constexpr u16 kUnderground = 0x8000;
 +
-+uint32_t Hash3(int x, int y, int z, uint32_t seed) {
-+    uint32_t h = (uint32_t)x * 73856093u ^ (uint32_t)y * 19349663u ^ (uint32_t)z * 83492791u ^ seed * 2654435761u;
-+    h = (h ^ (h >> 13)) * 1274126177u;
-+    return h ^ (h >> 16);
-+}
-+
-+// Smooth 3D value noise in [0, 1)
-+f32 Noise3(f32 x, f32 y, f32 z, uint32_t seed) {
-+    int x0 = (int)floorf(x), y0 = (int)floorf(y), z0 = (int)floorf(z);
-+    auto smooth = [](f32 t) { return t * t * (3 - 2 * t); };
-+    f32 fx = smooth(x - x0), fy = smooth(y - y0), fz = smooth(z - z0);
-+    auto v = [&](int dx, int dy, int dz) { return (Hash3(x0 + dx, y0 + dy, z0 + dz, seed) & 0xFFFF) / 65536.0f; };
-+    f32 x00 = v(0, 0, 0) + (v(1, 0, 0) - v(0, 0, 0)) * fx, x10 = v(0, 1, 0) + (v(1, 1, 0) - v(0, 1, 0)) * fx;
-+    f32 x01 = v(0, 0, 1) + (v(1, 0, 1) - v(0, 0, 1)) * fx, x11 = v(0, 1, 1) + (v(1, 1, 1) - v(0, 1, 1)) * fx;
-+    f32 y0v = x00 + (x10 - x00) * fy, y1v = x01 + (x11 - x01) * fy;
-+    return y0v + (y1v - y0v) * fz;
-+}
-+
-+// Caves: winding open spaces from a few blocks under the surface down to bedrock
-+bool CaveAt(int scene, const CellKey& c, int depth) {
-+    if (depth < 5 || depth >= kBedrockDepth - 2) {
-+        return false;
++// Layers of surface material (grass + dirt, sand + sandstone...) before the real underground starts
++int SurfaceLayers(u32 material) {
++    switch (material) {
++        case 0: case 1: case 6: case 8: case 11: return 3; // soil and sand
++        case 3: case 9: case 10: return 1000;             // Jabu-Jabu's insides, wooden floors and bridges
++        case 7: case 12: case 13: return 2;               // lava rock, ice, carpet
++        default: return 1;                                // stone
 +    }
-+    f32 x = (f32)std::get<0>(c), y = (f32)std::get<1>(c), z = (f32)std::get<2>(c);
-+    f32 n = Noise3(x / 9.0f, y / 5.0f, z / 9.0f, scene * 7 + 1) * 0.65f +
-+            Noise3(x / 4.0f, y / 4.0f, z / 4.0f, scene * 7 + 2) * 0.35f;
-+    return n > 0.64f;
-+}
-+
-+// Deep underground is a Minecraft world: stone (deepslate further down) with ores, the same every time
-+u16 Underground(const CellKey& c, int depth) {
-+    int x = std::get<0>(c), y = std::get<1>(c), z = std::get<2>(c);
-+    if (depth >= kBedrockDepth) {
-+        return FILL_BEDROCK;
-+    }
-+    bool deep = depth >= 14;
-+    // Blobs of other stone, dirt and gravel
-+    f32 blob = Noise3(x / 3.0f, y / 3.0f, z / 3.0f, 11);
-+    if (blob > 0.78f) {
-+        switch (Hash3(x / 4, y / 4, z / 4, 12) % 5) {
-+            case 0: return deep ? FILL_TUFF : FILL_DIRT;
-+            case 1: return FILL_GRAVEL;
-+            case 2: return FILL_GRANITE;
-+            case 3: return FILL_DIORITE;
-+            default: return FILL_ANDESITE;
-+        }
-+    }
-+    // Ore veins: small clusters, rarer and richer deeper down
-+    u32 r = Hash3(x, y, z, 13) % 1000;
-+    f32 vein = Noise3(x / 2.0f, y / 2.0f, z / 2.0f, 14);
-+    if (vein > 0.6f) {
-+        if (r < 90 && depth < 30) return FILL_COAL_ORE;
-+        if (r < 150) return deep ? FILL_DEEPSLATE_IRON : FILL_IRON_ORE;
-+        if (r < 190 && !deep) return FILL_COPPER_ORE;
-+        if (r < 225 && depth >= 8) return deep ? FILL_DEEPSLATE_REDSTONE : FILL_REDSTONE_ORE;
-+        if (r < 245 && depth >= 8) return FILL_LAPIS_ORE;
-+        if (r < 265 && depth >= 10) return deep ? FILL_DEEPSLATE_GOLD : FILL_GOLD_ORE;
-+        if (r < 278 && depth >= 14) return FILL_DEEPSLATE_DIAMOND;
-+    }
-+    return deep ? FILL_DEEPSLATE : FILL_STONE;
 +}
 +
 +// depth: 0 = right under the surface
@@ -4338,7 +4298,7 @@ index 0000000..7a647d1
 +    f32 cx = (b.mn[0] + b.mx[0]) * 0.5f, cy = (b.mn[1] + b.mx[1]) * 0.5f, cz = (b.mn[2] + b.mx[2]) * 0.5f;
 +    f32 hitY;
 +    CollisionPoly* above = SurfaceAbove(play, cx, cy, cz, &hitY);
-+    bool under = above != nullptr && COLPOLY_GET_NORMAL(above->normal.y) > 0 && hitY - cy < 64 * B;
++    bool under = above != nullptr && COLPOLY_GET_NORMAL(above->normal.y) > 0 && hitY - cy < 250 * B;
 +    // A floor crossing the block also makes it ground (slopes, the block you started digging at)
 +    CollisionHeader* col = play->colCtx.colHeader;
 +    CollisionPoly* through = nullptr;
@@ -4377,14 +4337,11 @@ index 0000000..7a647d1
 +    CollisionPoly* surf = through != nullptr ? through : above;
 +    int depth = through != nullptr ? 0 : (int)floorf((hitY - b.mx[1]) / B + 0.05f);
 +    depth = std::max(depth, 0);
-+    if (depth >= kBedrockDepth) {
-+        return FILL_BEDROCK;
++    u32 material = func_80041F10(&play->colCtx, surf, BGCHECK_SCENE);
++    if (depth >= SurfaceLayers(material)) {
++        return kUnderground | (u16)std::min(depth, 0x7FFF);
 +    }
-+    if (through == nullptr && CaveAt(play->sceneNum, c, depth)) {
-+        return FILL_CAVE;
-+    }
-+    u16 block = MaterialBlock(func_80041F10(&play->colCtx, surf, BGCHECK_SCENE), depth);
-+    return block == FILL_STONE ? Underground(c, depth) : block;
++    return MaterialBlock(material, depth);
 +}
 +
 +// ---------------------------------------------------------------------------------------------------------------
@@ -4464,34 +4421,6 @@ index 0000000..7a647d1
 +
 +const CellKey kFaces[6] = { { -1, 0, 0 }, { 1, 0, 0 }, { 0, -1, 0 }, { 0, 1, 0 }, { 0, 0, -1 }, { 0, 0, 1 } };
 +
-+// Broke into a cave: open the whole cave (up to a size), with Minecraft blocks for its walls
-+void RevealCave(PlayState* play, const CellKey& start) {
-+    auto& done = sConverted[play->sceneNum];
-+    std::vector<CellKey> queue{ start };
-+    std::set<CellKey> seen{ start };
-+    int opened = 0;
-+    for (size_t i = 0; i < queue.size() && opened < 700; i++) {
-+        const CellKey c = queue[i];
-+        if (!done.count(c)) {
-+            Convert(play, c, 0);
-+        }
-+        opened++;
-+        for (const CellKey& d : kFaces) {
-+            CellKey n{ std::get<0>(c) + std::get<0>(d), std::get<1>(c) + std::get<1>(d), std::get<2>(c) + std::get<2>(d) };
-+            if (!seen.insert(n).second || done.count(n)) {
-+                continue;
-+            }
-+            u16 g = GroundBlockAt(play, n);
-+            if (g == FILL_CAVE) {
-+                queue.push_back(n);
-+            } else if (g != 0) {
-+                Convert(play, n, g); // cave wall
-+            }
-+        }
-+    }
-+    SPDLOG_INFO("[OoTCraft] opened a cave: {} blocks", opened);
-+}
-+
 +std::map<int, std::set<CellKey>> sNotGround; // blocks known to be open air (no need to test again)
 +
 +u16 GroundBlockCached(PlayState* play, const CellKey& c) {
@@ -4508,9 +4437,7 @@ index 0000000..7a647d1
 +
 +// Make one block of ground real: a Minecraft block, or (in a cave) the whole cave
 +void OpenGround(PlayState* play, const CellKey& c, u16 g) {
-+    if (g == FILL_CAVE) {
-+        RevealCave(play, c);
-+    } else if (g != 0) {
++    if (g != 0) {
 +        Convert(play, c, g);
 +    }
 +}
@@ -4529,7 +4456,7 @@ index 0000000..7a647d1
 +    LoadConverted();
 +    CellKey c{ bx, by, bz };
 +    u16 fill = GroundBlockAt(play, c);
-+    Convert(play, c, fill != 0 && fill != FILL_CAVE ? fill : MaterialBlock(8, 0));
++    Convert(play, c, fill != 0 ? fill : MaterialBlock(8, 0));
 +}
 +
 +// A Minecraft block was mined away: if it was part of Hyrule's ground, the ground around it becomes blocks too
@@ -4551,6 +4478,24 @@ index 0000000..7a647d1
 +        }
 +        OpenGround(play, n, GroundBlockCached(play, n));
 +    }
++}
++
++// Minecraft found open air at a dug block (a cave, a mineshaft tunnel, a dungeon room...): the ground around it
++// opens up too, as far as the player is close enough to see it
++void TerrainCellAir(PlayState* play, int bx, int by, int bz) {
++    if (play == nullptr) {
++        return;
++    }
++    CellKey c{ bx, by, bz };
++    sFilledAt.erase(c);
++    Player* player = GET_PLAYER(play);
++    f32 dx = (bx - SceneOriginBlocksX(play->sceneNum) + 0.5f) * B - player->actor.world.pos.x;
++    f32 dy = (by - Bridge::ORIGIN_Y_BLOCKS + 0.5f) * B + GridYOffset() - player->actor.world.pos.y;
++    f32 dz = (bz + 0.5f) * B - player->actor.world.pos.z;
++    if (dx * dx + dy * dy + dz * dz > SQ(32 * B)) {
++        return; // too far to see: opens later, when the player comes near (HealDug)
++    }
++    TerrainBlockBroken(play, bx, by, bz);
 +}
 +
 +// An explosion (TNT, or one of Zelda's bombs going off in Minecraft too): blow a crater into Hyrule's ground,
@@ -4589,7 +4534,7 @@ index 0000000..7a647d1
 +                    continue;
 +                }
 +                bool blown = d <= r;
-+                if (blown || ground == FILL_CAVE) {
++                if (blown) {
 +                    Convert(play, c, 0); // blown away
 +                    crater++;
 +                } else {
