@@ -20,11 +20,11 @@ index 70ea296..ae67cb3 100644
  extern "C" ActorDBEntry* ActorDB_Retrieve(const int id) {
 diff --git a/soh/soh/Enhancements/Minecraft/Bridge.h b/soh/soh/Enhancements/Minecraft/Bridge.h
 new file mode 100644
-index 0000000..d602c75
+index 0000000..f42555c
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/Bridge.h
-@@ -0,0 +1,279 @@
-+#pragma once
+@@ -0,0 +1,323 @@
++﻿#pragma once
 +
 +// OoTCraft shared-memory bridge between Ship of Harkinian and the hidden Minecraft client ("ootmc" Fabric mod).
 +// Both processes map %TEMP%/oot_mc_bridge.bin. The layout must match Bridge.java exactly (little-endian).
@@ -38,6 +38,50 @@ index 0000000..d602c75
 +#include <cstdint>
 +
 +namespace Bridge {
++
++// Atomic access to plain fields in shared memory. std::atomic_ref isn't in Apple's libc++ (Xcode 15), so on
++// Clang/GCC this uses the compiler's own atomics, which take the same memory orders.
++template <typename T> class AtomicRef {
++  public:
++    explicit AtomicRef(T& v) : mV(v) {
++    }
++#if defined(_MSC_VER)
++    T load(std::memory_order o = std::memory_order_seq_cst) const {
++        return std::atomic_ref<T>(mV).load(o);
++    }
++    void store(T x, std::memory_order o = std::memory_order_seq_cst) const {
++        std::atomic_ref<T>(mV).store(x, o);
++    }
++    T fetch_add(T x, std::memory_order o = std::memory_order_seq_cst) const {
++        return std::atomic_ref<T>(mV).fetch_add(x, o);
++    }
++#else
++    T load(std::memory_order o = std::memory_order_seq_cst) const {
++        return __atomic_load_n(&mV, Order(o));
++    }
++    void store(T x, std::memory_order o = std::memory_order_seq_cst) const {
++        __atomic_store_n(&mV, x, Order(o));
++    }
++    T fetch_add(T x, std::memory_order o = std::memory_order_seq_cst) const {
++        return __atomic_fetch_add(&mV, x, Order(o));
++    }
++
++  private:
++    static int Order(std::memory_order o) {
++        switch (o) {
++            case std::memory_order_relaxed: return __ATOMIC_RELAXED;
++            case std::memory_order_consume: return __ATOMIC_CONSUME;
++            case std::memory_order_acquire: return __ATOMIC_ACQUIRE;
++            case std::memory_order_release: return __ATOMIC_RELEASE;
++            case std::memory_order_acq_rel: return __ATOMIC_ACQ_REL;
++            default: return __ATOMIC_SEQ_CST;
++        }
++    }
++#endif
++
++  private:
++    T& mV;
++};
 +
 +constexpr uint32_t MAGIC = 0x4D544F4F; // "OOTM"
 +constexpr uint32_t VERSION = 3;
@@ -250,7 +294,7 @@ index 0000000..d602c75
 +const char* TempDirPath();
 +
 +template <typename T, typename F> void SeqWrite(T& obj, F&& write) {
-+    std::atomic_ref<uint32_t> seq(obj.seq);
++    AtomicRef<uint32_t> seq(obj.seq);
 +    seq.fetch_add(1, std::memory_order_relaxed);
 +    std::atomic_thread_fence(std::memory_order_release);
 +    write(obj);
@@ -258,7 +302,7 @@ index 0000000..d602c75
 +}
 +
 +template <typename T> bool SeqRead(T& shared, T& out) {
-+    std::atomic_ref<uint32_t> seq(shared.seq);
++    AtomicRef<uint32_t> seq(shared.seq);
 +    for (int tries = 0; tries < 8; tries++) {
 +        uint32_t s1 = seq.load(std::memory_order_acquire);
 +        if (s1 & 1) {
@@ -274,7 +318,7 @@ index 0000000..d602c75
 +}
 +
 +inline bool Push(Ring& r, const Event& e) {
-+    std::atomic_ref<uint32_t> head(r.head), tail(r.tail);
++    AtomicRef<uint32_t> head(r.head), tail(r.tail);
 +    uint32_t h = head.load(std::memory_order_relaxed);
 +    if (h - tail.load(std::memory_order_acquire) >= RING_CAP) {
 +        return false;
@@ -285,7 +329,7 @@ index 0000000..d602c75
 +}
 +
 +inline bool Pop(Ring& r, Event& out) {
-+    std::atomic_ref<uint32_t> head(r.head), tail(r.tail);
++    AtomicRef<uint32_t> head(r.head), tail(r.tail);
 +    uint32_t t = tail.load(std::memory_order_relaxed);
 +    if (t == head.load(std::memory_order_acquire)) {
 +        return false;
@@ -443,7 +487,7 @@ index 0000000..57558a6
 +#endif
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftBlocks.cpp b/soh/soh/Enhancements/Minecraft/MinecraftBlocks.cpp
 new file mode 100644
-index 0000000..d2e38fe
+index 0000000..6d58e48
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftBlocks.cpp
 @@ -0,0 +1,1003 @@
@@ -671,7 +715,7 @@ index 0000000..d2e38fe
 +}
 +
 +uint32_t TexField(size_t offset) {
-+    return std::atomic_ref<uint32_t>(*(uint32_t*)(sTexView + offset)).load(std::memory_order_acquire);
++    return Bridge::AtomicRef<uint32_t>(*(uint32_t*)(sTexView + offset)).load(std::memory_order_acquire);
 +}
 +
 +void MarkAllChunksDirty(bool onlyWaiting) {
@@ -708,7 +752,7 @@ index 0000000..d2e38fe
 +    if (sInfos[id] != nullptr) {
 +        return sInfos[id];
 +    }
-+    uint16_t slot = std::atomic_ref<uint16_t>(*(uint16_t*)(sTexView + BlockTex::HEADER + id * 2))
++    uint16_t slot = Bridge::AtomicRef<uint16_t>(*(uint16_t*)(sTexView + BlockTex::HEADER + id * 2))
 +                        .load(std::memory_order_acquire);
 +    if (slot == 0 || slot > BlockTex::MAX_SLOTS) {
 +        return nullptr;
@@ -1452,7 +1496,7 @@ index 0000000..d2e38fe
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
 new file mode 100644
-index 0000000..81261ae
+index 0000000..72c27a7
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
 @@ -0,0 +1,866 @@
@@ -1573,7 +1617,7 @@ index 0000000..81261ae
 +        memset(sView, 0, sizeof(Layout));
 +        sView->header.version = VERSION;
 +        sView->header.totalSize = sizeof(Layout);
-+        std::atomic_ref<uint32_t>(sView->header.magic).store(MAGIC, std::memory_order_release);
++        Bridge::AtomicRef<uint32_t>(sView->header.magic).store(MAGIC, std::memory_order_release);
 +    }
 +#ifdef _WIN32
 +    sView->header.ootPid = GetCurrentProcessId();
@@ -1802,7 +1846,7 @@ index 0000000..81261ae
 +    Bridge::Layout* L = Bridge::Get();
 +    for (uint32_t i = 0; i < Bridge::SECTION_SLOTS; i++) {
 +        Bridge::SectionSlot& slot = L->sections[i];
-+        std::atomic_ref<uint32_t> gen(slot.gen);
++        Bridge::AtomicRef<uint32_t> gen(slot.gen);
 +        uint32_t g1 = gen.load(std::memory_order_acquire);
 +        if ((g1 & 1) || g1 == sSeenGen[i]) {
 +            continue;
@@ -2102,8 +2146,8 @@ index 0000000..81261ae
 +    if (L == nullptr) {
 +        return;
 +    }
-+    std::atomic_ref<uint64_t>(L->header.ootHeartbeat).fetch_add(1, std::memory_order_release);
-+    uint64_t beat = std::atomic_ref<uint64_t>(L->header.mcHeartbeat).load(std::memory_order_acquire);
++    Bridge::AtomicRef<uint64_t>(L->header.ootHeartbeat).fetch_add(1, std::memory_order_release);
++    uint64_t beat = Bridge::AtomicRef<uint64_t>(L->header.mcHeartbeat).load(std::memory_order_acquire);
 +    if (beat != sLastMcHeartbeat) {
 +        sLastMcHeartbeat = beat;
 +        sFramesSinceMcBeat = 0;
@@ -3732,7 +3776,7 @@ index 0000000..1165243
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp b/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp
 new file mode 100644
-index 0000000..53cae4c
+index 0000000..7de40d4
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp
 @@ -0,0 +1,287 @@
@@ -3836,7 +3880,7 @@ index 0000000..53cae4c
 +
 +// Copy the newest complete frame out of shared memory (seqlock), returns true if a new one arrived
 +bool FetchFrame() {
-+    std::atomic_ref<uint32_t> seq(Field(0));
++    Bridge::AtomicRef<uint32_t> seq(Field(0));
 +    uint32_t s1 = seq.load(std::memory_order_acquire);
 +    if ((s1 & 1) || s1 == sLastSeq || s1 == 0) {
 +        return false;
