@@ -167,6 +167,12 @@ public final class CollisionField {
             ByteBuffer b = ByteBuffer.wrap(Files.readAllBytes(file)).order(ByteOrder.LITTLE_ENDIAN);
             if (b.getInt(0) != 0x4D544F4F || b.getInt(4) != 2) return;
             int count = b.getInt(12), waterCount = b.getInt(16);
+            // The file comes from %TEMP%: make sure the counts match its size before allocating anything
+            if (count < 0 || waterCount < 0 || count > 2_000_000 || waterCount > 10_000
+                || 20L + count * 40L + waterCount * 12L > b.capacity()) {
+                OotMc.LOGGER.warn("Ignoring malformed collision mesh for scene {}", scene);
+                return;
+            }
             float[] tris = new float[count * 9];
             int[] flags = new int[count];
             double ox = Bridge.originX(scene), oy = Bridge.ORIGIN_Y_BLOCKS;

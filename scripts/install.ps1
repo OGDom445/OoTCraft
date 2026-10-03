@@ -14,7 +14,9 @@ param(
     [switch]$Yes                  # don't ask (you've read and agree to LEGAL.md)
 )
 
-$ErrorActionPreference = "Stop"
+# Programs like git and java print progress on stderr; Windows PowerShell 5 would treat that as a fatal error, so
+# native tools are judged by their exit codes and cmdlets that must succeed use -ErrorAction Stop.
+$ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 $root = Split-Path -Parent $PSScriptRoot
 $repo = "OGDom445/OoTCraft"                   # GitHub repository (releases with the mod jar)
@@ -25,6 +27,14 @@ $mcDir = Join-Path $env:APPDATA ".minecraft"
 function Title($text) { Write-Host ""; Write-Host "== $text" -ForegroundColor Cyan }
 function Ok($text) { Write-Host "   $text" -ForegroundColor Green }
 function Info($text) { Write-Host "   $text" }
+# Every download is checked against the checksum its source publishes; a mismatch deletes it and stops the install
+function Verify($file, $algorithm, $expected) {
+    $actual = (Get-FileHash $file -Algorithm $algorithm).Hash
+    if (-not $expected -or $actual -ne $expected.Trim().ToUpper()) {
+        Remove-Item $file -Force -ErrorAction SilentlyContinue
+        Fail "the download $(Split-Path -Leaf $file) failed its $algorithm check (corrupted or tampered). Please try again."
+    }
+}
 function Fail($text) { Write-Host ""; Write-Host "OoTCraft install stopped: $text" -ForegroundColor Red; exit 1 }
 
 Write-Host ""
@@ -73,10 +83,10 @@ function FindJdk {
         if (Test-Path $base) { $candidates += Get-ChildItem $base -Directory | Sort-Object Name -Descending | ForEach-Object FullName }
     }
     foreach ($c in $candidates) {
-        $java = Join-Path $c "bin\java.exe"
-        if (Test-Path $java) {
-            $v = & $java -version 2>&1 | Select-Object -First 1
-            if ($v -match '"(\d+)') { if ([int]$Matches[1] -ge 25) { return $c } }
+        $release = Join-Path $c "release"
+        if ((Test-Path (Join-Path $c "bin\java.exe")) -and (Test-Path $release)) {
+            $line = Select-String -Path $release -Pattern '^JAVA_VERSION="(\d+)' | Select-Object -First 1
+            if ($line -and [int]$line.Matches[0].Groups[1].Value -ge 25) { return $c }
         }
     }
     return $null
@@ -121,11 +131,12 @@ Title "Getting the OoTCraft Minecraft mod"
 $modJar = $null
 if (-not $BuildModFromSource -and $repo -notlike "OWNER/*") {
     try {
-        $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -Headers @{ "User-Agent" = "OoTCraft-Installer" }
+        $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -Headers @{ "User-Agent" = "OoTCraft-Installer" } -ErrorAction Stop
         $asset = $release.assets | Where-Object { $_.name -like "ootmc-*.jar" -and $_.name -notlike "*sources*" } | Select-Object -First 1
         if ($asset) {
             $modJar = Join-Path $env:TEMP $asset.name
-            Invoke-WebRequest $asset.browser_download_url -OutFile $modJar
+            Invoke-WebRequest $asset.browser_download_url -OutFile $modJar -ErrorAction Stop
+            if ($asset.digest -like "sha256:*") { Verify $modJar SHA256 $asset.digest.Substring(7) }
             Ok "Downloaded $($asset.name) from release $($release.tag_name)"
         }
     } catch { Info "No release download available; building the mod instead." }
@@ -143,10 +154,13 @@ if (-not $modJar) {
 # ---- 5. Fabric + the OoTCraft profile in YOUR Minecraft Launcher -----------------------------------------------------
 Title "Adding the OoTCraft profile to your Minecraft Launcher"
 $loaderVersion = (Select-String -Path (Join-Path $root "ootmc\gradle.properties") -Pattern '^loader_version=(.+)$').Matches[0].Groups[1].Value.Trim()
-$installerMeta = Invoke-RestMethod "https://meta.fabricmc.net/v2/versions/installer"
+$installerMeta = Invoke-RestMethod "https://meta.fabricmc.net/v2/versions/installer" -ErrorAction Stop
 $installerVersion = ($installerMeta | Where-Object stable | Select-Object -First 1).version
 $fabricInstaller = Join-Path $env:TEMP "fabric-installer-$installerVersion.jar"
-Invoke-WebRequest "https://maven.fabricmc.net/net/fabricmc/fabric-installer/$installerVersion/fabric-installer-$installerVersion.jar" -OutFile $fabricInstaller
+Invoke-WebRequest "https://maven.fabricmc.net/net/fabricmc/fabric-installer/$installerVersion/fabric-installer-$installerVersion.jar" -OutFile $fabricInstaller -ErrorAction Stop
+$fabricSha = (Invoke-WebRequest "https://maven.fabricmc.net/net/fabricmc/fabric-installer/$installerVersion/fabric-installer-$installerVersion.jar.sha256" -UseBasicParsing -ErrorAction Stop).Content
+if ($fabricSha -is [byte[]]) { $fabricSha = [Text.Encoding]::ASCII.GetString($fabricSha) }
+Verify $fabricInstaller SHA256 ($fabricSha -split '\s+')[0]
 & (Join-Path $jdk "bin\java.exe") -jar $fabricInstaller client -dir $mcDir -mcversion $minecraftVersion -loader $loaderVersion -noprofile
 if ($LASTEXITCODE -ne 0) { Fail "the official Fabric installer failed." }
 $versionId = "fabric-loader-$loaderVersion-$minecraftVersion"
@@ -154,11 +168,12 @@ Ok "Fabric $loaderVersion for Minecraft $minecraftVersion installed (official Fa
 
 New-Item -ItemType Directory -Force (Join-Path $profileDir "mods") | Out-Null
 Get-ChildItem (Join-Path $profileDir "mods") -Filter "ootmc-*.jar" | Remove-Item -Force
-Copy-Item $modJar (Join-Path $profileDir "mods") -Force
-$fabricApi = Invoke-RestMethod ("https://api.modrinth.com/v2/project/fabric-api/version?game_versions=" + [uri]::EscapeDataString("[`"$minecraftVersion`"]") + "&loaders=" + [uri]::EscapeDataString('["fabric"]')) -Headers @{ "User-Agent" = "OoTCraft-Installer" }
+Copy-Item $modJar (Join-Path $profileDir "mods") -Force -ErrorAction Stop
+$fabricApi = Invoke-RestMethod ("https://api.modrinth.com/v2/project/fabric-api/version?game_versions=" + [uri]::EscapeDataString("[`"$minecraftVersion`"]") + "&loaders=" + [uri]::EscapeDataString('["fabric"]')) -Headers @{ "User-Agent" = "OoTCraft-Installer" } -ErrorAction Stop
 $apiFile = ($fabricApi | Select-Object -First 1).files | Where-Object primary | Select-Object -First 1
 Get-ChildItem (Join-Path $profileDir "mods") -Filter "fabric-api-*.jar" | Remove-Item -Force
-Invoke-WebRequest $apiFile.url -OutFile (Join-Path $profileDir "mods\$($apiFile.filename)")
+Invoke-WebRequest $apiFile.url -OutFile (Join-Path $profileDir "mods\$($apiFile.filename)") -ErrorAction Stop
+Verify (Join-Path $profileDir "mods\$($apiFile.filename)") SHA512 $apiFile.hashes.sha512
 Ok "Mods: $(Split-Path -Leaf $modJar), $($apiFile.filename) (from Modrinth)"
 
 $now = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")

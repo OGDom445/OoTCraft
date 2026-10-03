@@ -1339,10 +1339,10 @@ index 0000000..5583eed
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
 new file mode 100644
-index 0000000..988802d
+index 0000000..415f394
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
-@@ -0,0 +1,727 @@
+@@ -0,0 +1,732 @@
 +﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -1823,6 +1823,11 @@ index 0000000..988802d
 +    std::string dir = FindModDir();
 +    if (dir.empty()) {
 +        SPDLOG_ERROR("[OoTCraft] can't find the ootmc Minecraft mod folder (set Minecraft.ModDir in the config)");
++        return;
++    }
++    // The folder goes into a cmd.exe command line: refuse anything that could break out of the quotes
++    if (dir.find_first_of("\"&|<>^%!\r\n") != std::string::npos) {
++        SPDLOG_ERROR("[OoTCraft] the ootmc folder path contains characters that aren't allowed: {}", dir);
 +        return;
 +    }
 +    std::string javaHome = FindJavaHome();

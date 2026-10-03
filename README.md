@@ -19,6 +19,11 @@ crawl, climb and fight your way through the real game, with Minecraft's hand, ho
 
 </div>
 
+> [!NOTE]
+> **Made with AI:** OoTCraft's code, scripts and documentation were written entirely with large language models
+> (AI coding assistants), directed and play-tested by a human. Expect rough edges, and please report bugs or
+> send fixes. See [LEGAL.md](LEGAL.md#9-ai-generated-code).
+
 ---
 
 ## ✨ What is it?
@@ -103,6 +108,8 @@ reports, development chat, screenshots of your builds in Hyrule, and news.
 - **Unofficial fan project.** Not affiliated with or endorsed by Nintendo, Mojang, Microsoft, Fabric or
   HarbourMasters. All trademarks belong to their owners.
 - **No warranty:** provided "as is" under the MIT License. Back up your saves.
+- **Written with AI:** the code was produced entirely with large language models. It has been play-tested, but
+  hasn't been reviewed line by line by a human expert.
 
 Full details: **[LEGAL.md](LEGAL.md)**. Rights holders can reach the maintainers through an issue or the Discord.
 

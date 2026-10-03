@@ -1,7 +1,8 @@
 # OoTCraft setup: fetch Ship of Harkinian 9.2.3, apply the OoTCraft patch, build it, and pre-build the Minecraft mod.
 # Run from the OoTCraft folder:  powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 param([switch]$SkipMod)  # the installer gets the mod separately
-$ErrorActionPreference = "Stop"
+# Native tools (git, cmake) report progress on stderr: judge them by exit code, not as PowerShell errors
+$ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
 $soh = Join-Path $root "Shipwright"
 $patch = Join-Path $root "soh\ootcraft-soh-9.2.3.patch"
@@ -18,11 +19,14 @@ Need python "install Python 3 from https://www.python.org/"
 if (-not (Test-Path $soh)) {
     Write-Host "Cloning Ship of Harkinian..."
     git clone https://github.com/HarbourMasters/Shipwright.git $soh
+    if ($LASTEXITCODE -ne 0) { throw "Cloning Ship of Harkinian failed" }
 }
 Push-Location $soh
 try {
-    git checkout $sohCommit
+    git checkout -q $sohCommit
+    if ($LASTEXITCODE -ne 0) { throw "Checking out Ship of Harkinian $sohCommit failed" }
     git submodule update --init --recursive
+    if ($LASTEXITCODE -ne 0) { throw "Fetching Ship of Harkinian's submodules failed" }
 
     # 2. The OoTCraft patch (skipped if it's already applied)
     git apply --check $patch 2>$null

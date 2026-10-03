@@ -96,7 +96,10 @@ public class OotMc implements ModInitializer {
                 LOGGER.info("[OoTCraft] {}", Underground.featureScan(server, Bridge.originX(85) - 2, 28, 4));
             });
         net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback.EVENT.register((dispatcher, access, env) ->
-            dispatcher.register(net.minecraft.commands.Commands.literal("ootcore").executes(ctx -> {
+            dispatcher.register(net.minecraft.commands.Commands.literal("ootcore")
+                // Scans hundreds of thousands of blocks: operators only (matters if the world is opened to LAN)
+                .requires(src -> src.hasPermission(2))
+                .executes(ctx -> {
                 var src = ctx.getSource();
                 var pos = net.minecraft.core.BlockPos.containing(src.getPosition());
                 String msg = Underground.coreSample(src.getServer(), pos.getX(), pos.getZ());

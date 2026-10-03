@@ -243,7 +243,7 @@ public final class Bridge {
             int s1 = (int) INT.getAcquire(buf, b);
             if ((s1 & 1) != 0) continue;
             if (s1 == lastSeq) return null;
-            int count = Math.min(buf.getInt(b + 4), DYNA_MAX_TRIS);
+            int count = Math.max(0, Math.min(buf.getInt(b + 4), DYNA_MAX_TRIS)); // never trust shared memory
             int scene = buf.getShort(b + 8);
             float[] tris = new float[count * 9];
             for (int i = 0; i < count; i++)
@@ -260,7 +260,7 @@ public final class Bridge {
         for (int tries = 0; tries < 4; tries++) {
             int s1 = (int) INT.getAcquire(buf, b);
             if ((s1 & 1) != 0) continue;
-            int count = Math.min(buf.getInt(b + 4), MAX_ACTORS);
+            int count = Math.max(0, Math.min(buf.getInt(b + 4), MAX_ACTORS));
             java.util.List<ActorInfo> list = new java.util.ArrayList<>(count);
             for (int i = 0; i < count; i++) {
                 int o = b + 64 + i * 40;

@@ -78,4 +78,13 @@ OoTCraft builds on, but does not include:
 
 These projects have their own licenses and terms, which apply to them.
 
+## 9. AI-generated code
+
+OoTCraft's source code, scripts and documentation were written **entirely with large language models** (AI coding
+assistants), directed, tested and published by the project's human maintainer. The project has been play-tested, but
+the code has not been reviewed line by line by a human expert and may contain bugs or security issues. This doesn't
+change the MIT License or the no-warranty terms above. Review the code yourself before relying on it, and please
+report problems through issues or the [Discord](https://discord.gg/w5sxzdPtT7). Contributions from humans and AI
+tools alike are welcome, under the same rules: original work only, and no copyrighted material.
+
 *This notice is not legal advice.*
