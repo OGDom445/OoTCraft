@@ -27,7 +27,7 @@ Requirements: Windows 10/11, Git, CMake 3.26+, Python 3, a JDK 21+, and Visual S
 C++ workload. You also need your own Ocarina of Time ROM and Minecraft: Java Edition.
 
 ```powershell
-git clone https://github.com/OWNER/OoTCraft.git
+git clone https://github.com/OGDom445/OoTCraft.git
 cd OoTCraft
 powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 ```

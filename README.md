@@ -15,7 +15,7 @@ crawl, climb and fight your way through the real game, with Minecraft's hand, ho
 [![No copyrighted material](https://img.shields.io/badge/copyrighted%20material-none-blue)](LEGAL.md)
 [![Contributions welcome](https://img.shields.io/badge/contributions-welcome-orange)](CONTRIBUTING.md)
 
-**[Website](https://OWNER.github.io/OoTCraft/) · [Discord](https://discord.gg/w5sxzdPtT7) · [Install](#-install) · [Contribute](CONTRIBUTING.md) · [Legal](LEGAL.md)**
+**[Website](https://ogdom445.github.io/OoTCraft/) · [Discord](https://discord.gg/w5sxzdPtT7) · [Install](#-install) · [Contribute](CONTRIBUTING.md) · [Legal](LEGAL.md)**
 
 </div>
 
@@ -50,7 +50,7 @@ OoTCraft runs **Minecraft: Java Edition 1.21** and **[Ship of Harkinian](https:/
 **You need:** Windows 10/11 · **your own** Ocarina of Time ROM · **your own** Minecraft: Java Edition (official
 launcher, Microsoft account) · about 15 GB free · an internet connection.
 
-1. **[Download OoTCraft](https://github.com/OWNER/OoTCraft/archive/refs/heads/main.zip)** and extract it.
+1. **[Download OoTCraft](https://github.com/OGDom445/OoTCraft/archive/refs/heads/main.zip)** and extract it.
 2. Double-click **`Install-OoTCraft.bat`**. It:
    - installs the build tools it needs (Git, CMake, Python, Java 21, Visual Studio C++ Build Tools) with `winget`;
    - downloads the official Ship of Harkinian source and builds it **on your PC** with the OoTCraft patch;

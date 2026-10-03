@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $root = Split-Path -Parent $PSScriptRoot
-$repo = "OWNER/OoTCraft"                   # GitHub repository (releases with the mod jar)
+$repo = "OGDom445/OoTCraft"                   # GitHub repository (releases with the mod jar)
 $minecraftVersion = "1.21"
 $profileDir = Join-Path $env:APPDATA ".ootcraft"   # OoTCraft's own Minecraft folder (worlds, mods, settings)
 $mcDir = Join-Path $env:APPDATA ".minecraft"
