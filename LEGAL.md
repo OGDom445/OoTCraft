@@ -27,7 +27,7 @@ Only original work by OoTCraft contributors, released under the [MIT License](LI
   files are shown only as diff context and are applied to the user's own checkout of the official repository.
   OoTCraft does not redistribute Ship of Harkinian.
 - `scripts/` and `Install-OoTCraft.bat`: installer and build scripts.
-- Documentation and the project website.
+- Documentation.
 
 ## 3. What this repository does **not** contain, and never will
 

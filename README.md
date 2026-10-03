@@ -15,7 +15,7 @@ crawl, climb and fight your way through the real game, with Minecraft's hand, ho
 [![No copyrighted material](https://img.shields.io/badge/copyrighted%20material-none-blue)](LEGAL.md)
 [![Contributions welcome](https://img.shields.io/badge/contributions-welcome-orange)](CONTRIBUTING.md)
 
-**[Website](https://ogdom445.github.io/OoTCraft/) · [Discord](https://discord.gg/w5sxzdPtT7) · [Install](#-install) · [Contribute](CONTRIBUTING.md) · [Legal](LEGAL.md)**
+**[Discord](https://discord.gg/w5sxzdPtT7) · [Install](#-install) · [Contribute](CONTRIBUTING.md) · [Legal](LEGAL.md)**
 
 </div>
 

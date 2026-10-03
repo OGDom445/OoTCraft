@@ -19,7 +19,7 @@ docs, ideas, art made for the project, or helping other players on the
 | `ootmc/` | The Minecraft mod (Fabric, Java 21, Minecraft 1.21). Player, inventory, blocks, the collision copy of Hyrule. |
 | `soh/ootcraft-soh-9.2.3.patch` | Everything on the Zelda side, as a patch to Ship of Harkinian 9.2.3. New code is in `soh/soh/Enhancements/Minecraft/`. |
 | `scripts/` | `install.ps1` (players), `setup.ps1` (contributors: clone, patch and build), `uninstall.ps1`. |
-| `docs/` | The project website (GitHub Pages). |
+| `docs/assets/` | Images used by the README. |
 
 ## Setting up a development build
 
