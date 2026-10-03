@@ -65,5 +65,5 @@ try {
 
 Write-Host ""
 Write-Host "Done. For contributors: start Shipwright\x64\Release\soh.exe, pick your own Ocarina of Time ROM the first"
-Write-Host "time, and tick Enhancements > Minecraft Mode > Developer Client to run Minecraft from this source tree."
+Write-Host "time, and tick OoTCraft > Play > Developer Client (Esc menu) to run Minecraft from this source tree."
 Write-Host "Players: use Install-OoTCraft.bat instead (it sets up your Minecraft Launcher)."

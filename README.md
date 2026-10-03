@@ -52,8 +52,10 @@ OoTCraft runs **Minecraft: Java Edition 1.21** and **[Ship of Harkinian](https:/
 
 ## 📥 Install
 
-**You need:** Windows 10/11 · **your own** Ocarina of Time ROM · **your own** Minecraft: Java Edition (official
-launcher, Microsoft account) · about 15 GB free · an internet connection.
+**You need:** Windows 10/11, Linux or macOS · **your own** Ocarina of Time ROM · **your own** Minecraft: Java
+Edition (official launcher, Microsoft account) · about 15 GB free · an internet connection.
+
+### Windows
 
 1. **[Download OoTCraft](https://github.com/OGDom445/OoTCraft/archive/refs/heads/main.zip)** and extract it.
 2. Double-click **`Install-OoTCraft.bat`**. It:
@@ -66,6 +68,21 @@ launcher, Microsoft account) · about 15 GB free · an internet connection.
    once it connects, and you're Steve in Hyrule.
 
 > To uninstall, run `scripts\uninstall.ps1` (it keeps your worlds unless you add `-RemoveWorlds`).
+
+### Linux and macOS (experimental)
+
+Linux and macOS support is new and less tested than Windows. Please tell us how it goes on the Discord.
+
+```bash
+git clone https://github.com/OGDom445/OoTCraft.git
+cd OoTCraft
+./install.sh
+```
+
+The script does the same as the Windows installer. It installs Ship of Harkinian's build dependencies with your
+package manager (apt, dnf or pacman on Linux; Homebrew on macOS), builds Ship of Harkinian with OoTCraft, adds the
+**OoTCraft** profile to your Minecraft Launcher (`~/.minecraft`, or the Flatpak launcher), and adds OoTCraft to your
+applications menu on Linux or `~/Applications/OoTCraft.command` on macOS. Downloads are checksum-verified.
 
 ## 🕹️ Controls
 
@@ -81,7 +98,7 @@ launcher, Microsoft account) · about 15 GB free · an internet connection.
 | E | Minecraft inventory | |
 | Enter | Zelda pause menu | Zelda pause menu |
 | F5 or G | Switch to Link | Switch back to Steve |
-| Esc | Ship of Harkinian menu (OoTCraft settings, Discord, world reset) | same |
+| Esc | Ship of Harkinian menu: the **OoTCraft** tab has the settings, world reset and Discord | same |
 
 ## 🤝 Contribute: everyone's welcome
 

@@ -29,7 +29,7 @@ were published under the MIT License.
   `soh/soh/Enhancements/Minecraft/`) are original OoTCraft work. The small changes to existing Ship of Harkinian
   files are shown only as diff context and are applied to the user's own checkout of the official repository.
   OoTCraft does not redistribute Ship of Harkinian.
-- `scripts/` and `Install-OoTCraft.bat`: installer and build scripts.
+- `scripts/`, `Install-OoTCraft.bat` and `install.sh`: installer and build scripts (Windows, Linux, macOS).
 - Documentation.
 
 ## 3. What this repository does **not** contain, and never will

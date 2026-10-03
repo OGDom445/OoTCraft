@@ -18,7 +18,7 @@ docs, ideas, art made for the project, or helping other players on the
 |---|---|
 | `ootmc/` | The Minecraft mod (Fabric, Java 21, Minecraft 1.21). Player, inventory, blocks, the collision copy of Hyrule. |
 | `soh/ootcraft-soh-9.2.3.patch` | Everything on the Zelda side, as a patch to Ship of Harkinian 9.2.3. New code is in `soh/soh/Enhancements/Minecraft/`. |
-| `scripts/` | `install.ps1` (players), `setup.ps1` (contributors: clone, patch and build), `uninstall.ps1`. |
+| `scripts/`, `install.sh` | `install.ps1` (Windows players), `install.sh` (Linux/macOS players; `--build-only` for contributors), `setup.ps1` (Windows contributors: clone, patch and build), `uninstall.ps1`. |
 | `docs/assets/` | Images used by the README. |
 
 ## Setting up a development build
@@ -33,7 +33,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 ```
 
 This clones Ship of Harkinian into `Shipwright/` (ignored by git), applies the patch, builds it and builds the mod.
-Run `Shipwright\x64\Release\soh.exe` and tick **Enhancements → Minecraft Mode → Developer Client**, so Minecraft
+Run `Shipwright\x64\Release\soh.exe` and tick **OoTCraft → Play → Developer Client** in the Esc menu, so Minecraft
 starts from `ootmc/` through Gradle's development client and picks up your changes.
 
 - Rebuild the Zelda side: `cmake --build Shipwright/build/x64 --config Release --target soh`

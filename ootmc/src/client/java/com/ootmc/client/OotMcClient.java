@@ -58,7 +58,6 @@ public class OotMcClient implements ClientModInitializer {
     private static boolean reportedDeath = false;
     private static String lastScreenName = "";
     private static Vec3 freezePos = null;
-    private static int frame = 0;
     private static final Bridge.Event ev = new Bridge.Event();
     /** Keys / buttons Zelda says are held; re-asserted every frame (the hidden window loses Minecraft's own key state). */
     private static final java.util.Set<Integer> heldKeys = new java.util.HashSet<>();
@@ -483,7 +482,9 @@ public class OotMcClient implements ClientModInitializer {
         bridge.writeMc(Bridge.ootX(currentScene, feet.x), Bridge.ootY(feet.y), Bridge.ootZ(feet.z),
             (float) ((eye.y - feet.y) * Bridge.UNITS_PER_BLOCK), (float) fov,
             Bridge.ootYaw(player.getViewYRot(partial)), Bridge.ootPitch(player.getViewXRot(partial)), flags,
-            player.getHealth(), player.getMaxHealth(), frame++, (short) currentScene, player.getInventory().selected,
+            player.getHealth(), player.getMaxHealth(),
+            // the mouse totals this view already includes, so Zelda can turn by the rest itself (no input lag)
+            (lastDx & 0xFFFF) | (lastDy << 16), (short) currentScene, player.getInventory().selected,
             stage, dpos.getX(), dpos.getY(), dpos.getZ());
     }
 }
