@@ -9,7 +9,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 
 param(
-    [switch]$SkipPrerequisites,   # you already have Git, CMake, Python, a JDK 21 and Visual Studio C++ build tools
+    [switch]$SkipPrerequisites,   # you already have Git, CMake, Python, a JDK 25 and Visual Studio C++ build tools
     [switch]$BuildModFromSource,  # build the Minecraft mod instead of downloading the released jar
     [switch]$Yes                  # don't ask (you've read and agree to LEGAL.md)
 )
@@ -76,7 +76,7 @@ function FindJdk {
         $java = Join-Path $c "bin\java.exe"
         if (Test-Path $java) {
             $v = & $java -version 2>&1 | Select-Object -First 1
-            if ($v -match '"(\d+)') { if ([int]$Matches[1] -ge 21) { return $c } }
+            if ($v -match '"(\d+)') { if ([int]$Matches[1] -ge 25) { return $c } }
         }
     }
     return $null
@@ -90,12 +90,12 @@ function HasVcTools {
 
 if (-not $SkipPrerequisites) {
     Title "Installing build tools (only the ones you're missing)"
-    if (-not (Have winget)) { Fail "winget (App Installer) is missing. Install 'App Installer' from the Microsoft Store, or install Git, CMake, Python 3, a JDK 21 and Visual Studio 2022 Build Tools (C++) yourself and run again with -SkipPrerequisites." }
+    if (-not (Have winget)) { Fail "winget (App Installer) is missing. Install 'App Installer' from the Microsoft Store, or install Git, CMake, Python 3, a JDK 25 and Visual Studio 2022 Build Tools (C++) yourself and run again with -SkipPrerequisites." }
     $wingetArgs = @("--accept-source-agreements", "--accept-package-agreements", "--silent", "-e")
     if (-not (Have git)) { Info "Git..."; winget install --id Git.Git @wingetArgs | Out-Null }
     if (-not (Have cmake)) { Info "CMake..."; winget install --id Kitware.CMake @wingetArgs | Out-Null }
     if (-not (Have python)) { Info "Python 3..."; winget install --id Python.Python.3.12 @wingetArgs | Out-Null }
-    if (-not (FindJdk)) { Info "Java 21 (Eclipse Temurin)..."; winget install --id EclipseAdoptium.Temurin.21.JDK @wingetArgs | Out-Null }
+    if (-not (FindJdk)) { Info "Java 25 (Eclipse Temurin)..."; winget install --id EclipseAdoptium.Temurin.25.JDK @wingetArgs | Out-Null }
     if (-not (HasVcTools)) {
         Info "Visual Studio 2022 Build Tools with C++ (large download, takes a while)..."
         winget install --id Microsoft.VisualStudio.2022.BuildTools @wingetArgs --override "--wait --quiet --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" | Out-Null
@@ -104,7 +104,7 @@ if (-not $SkipPrerequisites) {
 }
 foreach ($c in @("git", "cmake", "python")) { if (-not (Have $c)) { Fail "$c still isn't available. Open a new window and run the installer again." } }
 $jdk = FindJdk
-if (-not $jdk) { Fail "no Java 21+ found. Install Eclipse Temurin 21 (https://adoptium.net/) and run again." }
+if (-not $jdk) { Fail "no Java 25+ found (it builds the mod; Minecraft itself uses its own Java). Install Eclipse Temurin 25 (https://adoptium.net/) and run again." }
 $env:JAVA_HOME = $jdk
 Ok "Build tools ready (Java: $jdk)"
 

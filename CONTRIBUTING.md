@@ -23,7 +23,7 @@ docs, ideas, art made for the project, or helping other players on the
 
 ## Setting up a development build
 
-Requirements: Windows 10/11, Git, CMake 3.26+, Python 3, a JDK 21+, and Visual Studio 2022 (or Build Tools) with the
+Requirements: Windows 10/11, Git, CMake 3.26+, Python 3, a JDK 25+ (Fabric Loom needs it; the mod itself targets Java 21), and Visual Studio 2022 (or Build Tools) with the
 C++ workload. You also need your own Ocarina of Time ROM and Minecraft: Java Edition.
 
 ```powershell
@@ -57,7 +57,8 @@ Then commit the updated patch along with any mod changes.
 - Keep each pull request focused on one fix or feature. Describe what you changed and how you tested it in-game.
 - Match the surrounding style: C++ uses the Ship of Harkinian clang-format style; Java uses 4-space indents.
 - Comments explain *why* something is done, not what each line does.
-- CI builds the mod and checks the patch still applies to a clean Ship of Harkinian 9.2.3.
+- CI builds the mod, checks the patch still applies to a clean Ship of Harkinian 9.2.3, and runs
+  `scripts/check_no_game_data.py`, which rejects ROMs, extracted game archives and oversized files.
 
 ## Reporting bugs
 

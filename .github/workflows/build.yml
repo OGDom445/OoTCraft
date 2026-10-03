@@ -18,12 +18,14 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "25"
       - name: Build ootmc
         working-directory: ootmc
         run: |
           chmod +x gradlew
           ./gradlew build --console=plain
+      - name: No ROMs or game data (repository and jar)
+        run: python3 scripts/check_no_game_data.py ootmc/build/libs/ootmc-*.jar
       - uses: actions/upload-artifact@v4
         with:
           name: ootmc-jar
@@ -55,9 +57,22 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/ootmc-*.jar
+            dist/ootmc-*[0-9].jar
           body: |
-            Download the source (zip) below, extract it, and double-click **Install-OoTCraft.bat**.
-            The installer uses this release's mod jar and builds Ship of Harkinian on your PC.
-            You need your own Ocarina of Time ROM and Minecraft: Java Edition. See LEGAL.md.
+            ## Install
+            Download **Source code (zip)** below, extract it, and double-click **Install-OoTCraft.bat**.
+            The installer uses this release's mod jar, builds Ship of Harkinian on your PC from its official source,
+            and adds an OoTCraft profile to your own Minecraft Launcher.
+
+            ## Bring your own games
+            - **No ROM is included, embedded or downloaded.** The first time Ship of Harkinian starts, it asks you to
+              pick **your own** Ocarina of Time ROM (dumped from your own cartridge) and builds its game data from it,
+              on your PC only.
+            - Minecraft: Java Edition runs from **your own** official launcher and Microsoft account.
+
+            ## What's in this release
+            - `ootmc-*.jar`: the OoTCraft Minecraft mod (Fabric, Minecraft 1.21). Original OoTCraft code only. It is
+              automatically checked to contain no ROMs or game data.
+
+            OoTCraft is free, unofficial and not affiliated with Nintendo, Mojang or Microsoft. See LEGAL.md.
             Community: https://discord.gg/w5sxzdPtT7

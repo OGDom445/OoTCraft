@@ -52,7 +52,7 @@ launcher, Microsoft account) · about 15 GB free · an internet connection.
 
 1. **[Download OoTCraft](https://github.com/OGDom445/OoTCraft/archive/refs/heads/main.zip)** and extract it.
 2. Double-click **`Install-OoTCraft.bat`**. It:
-   - installs the build tools it needs (Git, CMake, Python, Java 21, Visual Studio C++ Build Tools) with `winget`;
+   - installs the build tools it needs (Git, CMake, Python, Java 25, Visual Studio C++ Build Tools) with `winget`;
    - downloads the official Ship of Harkinian source and builds it **on your PC** with the OoTCraft patch;
    - adds an **OoTCraft** profile (Minecraft 1.21 + Fabric) to **your own Minecraft Launcher**;
    - puts an **OoTCraft** shortcut on your desktop.
