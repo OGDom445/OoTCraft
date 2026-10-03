@@ -2388,10 +2388,10 @@ index 0000000..2e004f1
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
 new file mode 100644
-index 0000000..25f306b
+index 0000000..91e7ffc
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
-@@ -0,0 +1,797 @@
+@@ -0,0 +1,835 @@
 +#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -2555,6 +2555,11 @@ index 0000000..25f306b
 +    return hex;
 +}
 +
++// A room drawn as a painted background with a fixed camera (houses, shops, Castle Town)
++bool PaintedRoom(PlayState* play) {
++    return play->roomCtx.curRoom.meshHeader != nullptr && play->roomCtx.curRoom.meshHeader->base.type == 1;
++}
++
 +bool PlayerFrozen(PlayState* play, Player* player) {
 +    if (play->transitionTrigger != TRANS_TRIGGER_OFF || play->transitionMode != TRANS_MODE_OFF) {
 +        return true;
@@ -2697,17 +2702,41 @@ index 0000000..25f306b
 +    }
 +    bool lmb = vk[VK_LBUTTON], rmb = vk[VK_RBUTTON], mmb = vk[VK_MBUTTON];
 +    bool togglePressed = (vk['G'] && !sPrevVk['G']) || (vk[VK_F5] && !sPrevVk[VK_F5]);
++    // Indoors with a painted background (houses, shops, Castle Town) Zelda's camera is fixed, so Steve's first person
++    // can't work there: those rooms play with Link's controls (movement follows the camera, as in Zelda), and
++    // Steve's eyes come back outside. F5 still switches by hand; that choice holds until you leave the room.
++    static bool sAutoLink = false;
++    static int sChoiceRoom = -1;
++    bool painted = PaintedRoom(play);
++    int roomKey = play->sceneNum * 256 + play->roomCtx.curRoom.num;
++    if (sChoiceRoom != -1 && sChoiceRoom != roomKey) {
++        sChoiceRoom = -1;
++    }
 +    if (togglePressed && mc != nullptr && !(mc->flags & Bridge::MC_SCREEN_OPEN) &&
 +        play->msgCtx.msgMode == MSGMODE_NONE && play->pauseCtx.state == 0) {
 +        sLinkMode = !sLinkMode;
++        sAutoLink = false;
++        if (painted) {
++            sChoiceRoom = roomKey;
++        }
 +        player->actor.focus.rot.x = 0; // don't carry Minecraft's last look up/down into third person
-+        if (sLinkMode) {
++        if (sLinkMode && !painted) {
 +            // Third person starts right behind Steve, facing where he was looking
 +            play->manualCamera = false;
 +            f32 s = Math_SinS(player->actor.shape.rot.y), c = Math_CosS(player->actor.shape.rot.y);
 +            Vec3f at = { player->actor.world.pos.x, player->actor.world.pos.y + 50.0f, player->actor.world.pos.z };
 +            Vec3f eye = { at.x - s * 180.0f, at.y + 30.0f, at.z - c * 180.0f };
 +            Play_CameraSetAtEye(play, MAIN_CAM, &at, &eye);
++        }
++    }
++    if (mc != nullptr && sChoiceRoom == -1 && !PlayerFrozen(play, player)) {
++        if (painted && !sLinkMode) {
++            sLinkMode = true;
++            sAutoLink = true;
++            player->actor.focus.rot.x = 0;
++        } else if (!painted && sAutoLink) {
++            sLinkMode = false;
++            sAutoLink = false;
 +        }
 +    }
 +    bool mcScreen = mc != nullptr && (mc->flags & Bridge::MC_SCREEN_OPEN);
@@ -3071,6 +3100,14 @@ index 0000000..25f306b
 +        return false;
 +    }
 +    sFpActiveThisFrame = false;
++    // Zelda's camera ignores anything nearer than 10 units, tuned for a camera floating behind Link. Steve's eye
++    // sits right against walls and floors (crawling, looking down, hugging a wall), where that cut a see-through
++    // hole into the world. First person uses Minecraft's near distance; everything else gets Zelda's back.
++    static f32 sZeldaNear = 0.0f;
++    if (sZeldaNear == 0.0f) {
++        sZeldaNear = play->view.zNear;
++    }
++    play->view.zNear = sZeldaNear;
 +    if (play->activeCamera != MAIN_CAM || !sPuppetActive) {
 +        return false;
 +    }
@@ -3091,6 +3128,7 @@ index 0000000..25f306b
 +    at->y = eye->y + d.y * 100.0f;
 +    at->z = eye->z + d.z * 100.0f;
 +    *fov = mc->fov;
++    play->view.zNear = 2.0f;
 +    sFpActiveThisFrame = true;
 +    sFpFrame = play->gameplayFrames;
 +    return true;
