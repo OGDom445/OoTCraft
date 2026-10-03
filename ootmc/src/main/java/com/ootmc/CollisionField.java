@@ -35,6 +35,8 @@ public final class CollisionField {
         /** Lowest point of Hyrule's ground in this scene (Minecraft Y): nothing below it but void */
         public float lowestY = -1e9f;
         final Map<Long, int[]> buckets = new HashMap<>();
+        /** Fingerprint of each section's triangles, so a reload only rebuilds the sections that changed */
+        final Map<Long, Integer> bucketHash = new HashMap<>();
         final List<short[]> water = new ArrayList<>(); // xMin, ySurface, zMin, xLength, zLength (OoT units)
 
         public int scene() {
@@ -99,6 +101,25 @@ public final class CollisionField {
 
     /** Is this box touching one of Hyrule's climbable surfaces (ladders, vines, climbable walls)? */
     public static boolean touchingClimbable(net.minecraft.world.phys.AABB box) {
+        return touching(box, 2);
+    }
+
+    /** Is this box touching the mouth of one of Hyrule's crawlspaces? */
+    public static boolean touchingCrawlspace(net.minecraft.world.phys.AABB box) {
+        return touching(box, 4);
+    }
+
+    /** Does Hyrule's collision (scene or moving platforms) overlap this box? */
+    public static boolean blocked(Level level, AABB box) {
+        List<VoxelShape> shapes = new ArrayList<>();
+        collect(level, box, shapes);
+        for (VoxelShape shape : shapes) {
+            for (AABB b : shape.toAabbs()) if (b.intersects(box)) return true;
+        }
+        return false;
+    }
+
+    private static boolean touching(net.minecraft.world.phys.AABB box, int flag) {
         Mesh m = mesh;
         if (m == null) return false;
         double cx = (box.minX + box.maxX) / 2, cy = (box.minY + box.maxY) / 2, cz = (box.minZ + box.maxZ) / 2;
@@ -111,7 +132,7 @@ public final class CollisionField {
                     if (list == null) continue;
                     for (int k = 1; k <= list[0]; k++) {
                         int i = list[k];
-                        if ((m.flags[i] & 2) == 0 || !seen.add(i)) continue;
+                        if ((m.flags[i] & flag) == 0 || !seen.add(i)) continue;
                         float[] t = m.tris;
                         double ax = t[i * 9], ay = t[i * 9 + 1], az = t[i * 9 + 2];
                         double bx = t[i * 9 + 3], by = t[i * 9 + 4], bz = t[i * 9 + 5];
@@ -194,11 +215,32 @@ public final class CollisionField {
                             nm.buckets.put(key, list);
                         }
             }
-            cache.clear();
+            for (Map.Entry<Long, int[]> e : nm.buckets.entrySet()) {
+                int[] list = e.getValue();
+                int h = list[0];
+                for (int k = 1; k <= list[0]; k++) {
+                    int t = list[k];
+                    for (int c = 0; c < 9; c++) h = h * 31 + Float.floatToIntBits(tris[t * 9 + c]);
+                    h = h * 31 + flags[t];
+                }
+                nm.bucketHash.put(e.getKey(), h);
+            }
+            // Digging changes a few sections: keep every other section's collision instead of re-voxelizing them
+            // all on the game thread (that was the hitch after each mined block)
+            int kept = 0;
+            if (m != null && m.scene == scene) {
+                for (var it = cache.entrySet().iterator(); it.hasNext(); ) {
+                    Long key = it.next().getKey();
+                    if (java.util.Objects.equals(m.bucketHash.get(key), nm.bucketHash.get(key))) kept++;
+                    else it.remove();
+                }
+            } else {
+                cache.clear();
+            }
             mesh = nm;
             loadedMeshVersion = meshVersion;
-            OotMc.LOGGER.info("Collision field for scene {}: {} triangles, {} sections, {} water boxes ({} ms)", scene,
-                count, nm.buckets.size(), waterCount, (System.nanoTime() - started) / 1_000_000);
+            OotMc.LOGGER.info("Collision field for scene {}: {} triangles, {} sections ({} kept), {} water boxes ({} ms)",
+                scene, count, nm.buckets.size(), kept, waterCount, (System.nanoTime() - started) / 1_000_000);
         } catch (IOException e) {
             OotMc.LOGGER.error("Reading collision mesh for scene {}", scene, e);
         }
@@ -274,7 +316,10 @@ public final class CollisionField {
         if (list == null) {
             s = new Section(new AABB[0], NONE);
         } else {
-            s = voxelize(m.tris, list, 1, list[0], sx * 16.0, sy * 16.0, sz * 16.0, RES, 2);
+            // Crawlspace walls (flag 4) aren't solid: they're where Steve crawls in
+            int[] solid = new int[list[0] + 1];
+            for (int k = 1; k <= list[0]; k++) if ((m.flags[list[k]] & 4) == 0) solid[++solid[0]] = list[k];
+            s = voxelize(m.tris, solid, 1, solid[0], sx * 16.0, sy * 16.0, sz * 16.0, RES, 2);
         }
         if (cache.size() > 4000) cache.clear();
         cache.put(key, s);

@@ -1,5 +1,6 @@
 # OoTCraft setup: fetch Ship of Harkinian 9.2.3, apply the OoTCraft patch, build it, and pre-build the Minecraft mod.
 # Run from the OoTCraft folder:  powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+param([switch]$SkipMod)  # the installer gets the mod separately
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $soh = Join-Path $root "Shipwright"
@@ -46,7 +47,9 @@ try {
     Pop-Location
 }
 
-# 4. The Minecraft mod (downloads Minecraft 1.21 and Fabric the first time)
+if ($SkipMod) { return }
+
+# 4. The Minecraft mod (Loom fetches the Minecraft 1.21 libraries it compiles against)
 Write-Host "Building the ootmc Minecraft mod..."
 Push-Location (Join-Path $root "ootmc")
 try {
@@ -57,5 +60,6 @@ try {
 }
 
 Write-Host ""
-Write-Host "Done. Start Shipwright\x64\Release\soh.exe, pick your Ocarina of Time ROM the first time, load a file,"
-Write-Host "and Minecraft starts in the background on its own."
+Write-Host "Done. For contributors: start Shipwright\x64\Release\soh.exe, pick your own Ocarina of Time ROM the first"
+Write-Host "time, and tick Enhancements > Minecraft Mode > Developer Client to run Minecraft from this source tree."
+Write-Host "Players: use Install-OoTCraft.bat instead (it sets up your Minecraft Launcher)."

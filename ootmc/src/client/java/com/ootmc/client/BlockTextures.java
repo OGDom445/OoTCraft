@@ -37,11 +37,16 @@ import java.util.concurrent.ThreadLocalRandom;
  *   64: u16[65536] block-state id -> slot + 1 (0 = not exported yet)
  *   64 + 131072: slots of 16 bytes (kind, flags, box min xyz, box max xyz in sixteenths) + 6 faces of 16x16 RGBA
  *                (order -x, +x, -y, +y, -z, +z)
+ *   then, per slot, a model (kind 2: fire, torches, plants, stairs, fences...): u32 quad count + MAX_QUADS quads of
+ *                4 x (s16 x, y, z in 1/256 block, s16 u, v in 1/16 texel) + u8 texture (one of the slot's 6) + u8 shade
+ *                + 2 pad. The box is still used for collision.
  */
 public final class BlockTextures {
     static final int MAGIC = 0x58455442, HEADER = 64, TABLE = 65536 * 2, ENTRY = 16 + 6 * 1024, MAX_SLOTS = 2048;
-    static final long SIZE = HEADER + TABLE + (long) ENTRY * MAX_SLOTS;
-    static final int KIND_BOX = 0, KIND_CROSS = 1;
+    static final int MAX_QUADS = 128, QUAD = 44, MODEL = 4 + MAX_QUADS * QUAD;
+    static final long MODELS = HEADER + TABLE + (long) ENTRY * MAX_SLOTS;
+    static final long SIZE = MODELS + (long) MODEL * MAX_SLOTS;
+    static final int KIND_BOX = 0, KIND_CROSS = 1, KIND_MODEL = 2;
     static final int FLAG_OCCLUDES = 1, FLAG_COLLIDES = 2, FLAG_CUTOUT = 4, FLAG_WOOD = 8;
     private static final Direction[] FACES = { Direction.WEST, Direction.EAST, Direction.DOWN, Direction.UP,
         Direction.NORTH, Direction.SOUTH };
@@ -99,6 +104,10 @@ public final class BlockTextures {
                 }
             }
         }
+        if (!audited && mc.level != null && open()) {
+            audited = true;
+            audit(mc);
+        }
         if (mc.level == null || BlockPalette.PENDING.isEmpty() || !open()) return;
         for (int n = 0; n < 256; n++) {
             Integer id = BlockPalette.PENDING.poll();
@@ -110,6 +119,57 @@ public final class BlockTextures {
                 OotMc.LOGGER.warn("Couldn't export block {}", Block.stateById(id), e);
             }
         }
+    }
+
+    private static boolean audited = false;
+
+    /**
+     * Once per launch: run every 1.21 block (default state) through the export Zelda draws from and log how each one
+     * comes out (cube, real model, flat cross) and any that fail. The slots are then wiped, so the audit costs nothing
+     * later; Zelda sees a fresh session and re-reads only what's actually placed.
+     */
+    private static void audit(Minecraft mc) {
+        long started = System.nanoTime();
+        int cubes = 0, models = 0, crosses = 0, liquids = 0;
+        List<String> failed = new ArrayList<>(), fallbacks = new ArrayList<>();
+        for (Block block : net.minecraft.core.registries.BuiltInRegistries.BLOCK) {
+            BlockState st = block.defaultBlockState();
+            int id = Block.getId(st);
+            String name = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(block).getPath();
+            if (st.isAir() || id <= 0 || id > 0xFFFF) continue;
+            if (st.getRenderShape() == net.minecraft.world.level.block.RenderShape.INVISIBLE
+                && !(block instanceof net.minecraft.world.level.block.LiquidBlock)) continue;
+            int before = slots;
+            try {
+                export(mc, id);
+            } catch (Exception e) {
+                failed.add(name + " (" + e.getClass().getSimpleName() + ")");
+                continue;
+            }
+            if (slots == before) { failed.add(name + " (nothing written)"); continue; }
+            int kind = buf.get(HEADER + TABLE + (before) * ENTRY);
+            if (block instanceof net.minecraft.world.level.block.LiquidBlock) liquids++;
+            else if (kind == KIND_MODEL) models++;
+            else if (kind == KIND_CROSS) crosses++;
+            else {
+                cubes++;
+                if (!Block.isShapeFullBlock(st.getShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO))) fallbacks.add(name);
+            }
+            if (slots >= MAX_SLOTS - 1) break;
+        }
+        OotMc.LOGGER.info("[OoTCraft] block audit: {} cubes, {} real models, {} flat crosses, {} liquids, {} failed "
+                + "({} ms)", cubes, models, crosses, liquids, failed.size(), (System.nanoTime() - started) / 1_000_000);
+        if (!failed.isEmpty()) OotMc.LOGGER.warn("[OoTCraft] blocks that couldn't be exported: {}", failed);
+        if (!fallbacks.isEmpty()) OotMc.LOGGER.info("[OoTCraft] non-cube blocks drawn as boxes: {}", fallbacks);
+        // Wipe: Zelda starts over with only the blocks really in use
+        buf.putInt(0, 0);
+        for (int i = 0; i < TABLE; i += 8) buf.putLong(HEADER + i, 0L);
+        slots = 0;
+        buf.putInt(8, 0);
+        buf.putInt(4, ThreadLocalRandom.current().nextInt(1, Integer.MAX_VALUE));
+        VarHandle.releaseFence();
+        buf.putInt(0, MAGIC);
+        cracksExported = false;
     }
 
     private static void export(Minecraft mc, int id) {
@@ -127,6 +187,11 @@ public final class BlockTextures {
         AABB box = !shape.isEmpty() ? shape.bounds() : collides ? col.bounds() : new AABB(0, 0, 0, 1, 1, 1);
         boolean flat = box.maxY - box.minY <= 0.2;
         int kind = collides || flat ? KIND_BOX : KIND_CROSS;
+        if (s.getBlock() instanceof net.minecraft.world.level.block.BaseFireBlock) {
+            // Fire's outline is a thin slab at the bottom, but it's drawn as tall crossed flames
+            kind = KIND_CROSS;
+            box = new AABB(0, 0, 0, 1, 1, 1);
+        }
         if (s.getBlock() instanceof net.minecraft.world.level.block.LiquidBlock) {
             // Water and lava: a full see-through block with the still texture (lava glows, water gets its blue)
             boolean water = s.getFluidState().is(net.minecraft.tags.FluidTags.WATER);
@@ -163,6 +228,12 @@ public final class BlockTextures {
             }
         }
 
+        // Anything that isn't a plain cube is drawn with its real model (fire's flames, torches, plants, slabs,
+        // stairs, fences, doors...) when it fits the format
+        if (!Block.isShapeFullBlock(shape) || kind == KIND_CROSS) {
+            if (exportModel(mc, s, id, model, rnd, collides, box)) return;
+        }
+
         boolean cutout = false;
         for (int[] face : faces) for (int px : face) if ((px >>> 24) < 128) cutout = true;
         if (kind == KIND_CROSS) cutout = true;
@@ -177,8 +248,86 @@ public final class BlockTextures {
         writeEntry(id, kind, flags, box, faces);
     }
 
+    /** A block's baked model as quads over up to 6 distinct (sprite, tint) textures. False if it doesn't fit. */
+    private static boolean exportModel(Minecraft mc, BlockState s, int id, BakedModel model, RandomSource rnd,
+                                       boolean collides, AABB box) {
+        List<BakedQuad> quads = new ArrayList<>();
+        for (Direction d : Direction.values()) quads.addAll(model.getQuads(s, d, RandomSource.create(42L)));
+        quads.addAll(model.getQuads(s, null, RandomSource.create(42L)));
+        if (quads.isEmpty() || quads.size() > MAX_QUADS) return false;
+        List<Object> keys = new ArrayList<>();
+        int[][] faces = new int[6][];
+        int[] texOf = new int[quads.size()];
+        for (int i = 0; i < quads.size(); i++) {
+            BakedQuad q = quads.get(i);
+            int tint = tint(mc, s, q);
+            Object key = java.util.List.of(q.getSprite().contents().name(), tint);
+            int t = keys.indexOf(key);
+            if (t < 0) {
+                if (keys.size() == 6) return false;
+                t = keys.size();
+                keys.add(key);
+                faces[t] = new int[256];
+                blit(faces[t], q.getSprite(), tint);
+            }
+            texOf[i] = t;
+        }
+        for (int t = 0; t < 6; t++) if (faces[t] == null) faces[t] = faces[0];
+        int flags = FLAG_CUTOUT;
+        if (collides) flags |= FLAG_COLLIDES;
+        if (s.is(BlockTags.LOGS) || s.is(BlockTags.PLANKS)) flags |= FLAG_WOOD;
+        int slot = writeEntry(id, KIND_MODEL, flags, box, faces, false);
+        if (slot < 0) return false;
+        long m = MODELS + (long) slot * MODEL;
+        for (int i = 0; i < quads.size(); i++) {
+            BakedQuad q = quads.get(i);
+            TextureAtlasSprite sp = q.getSprite();
+            int[] v = q.getVertices();
+            int stride = v.length / 4;
+            int o = (int) (m + 4 + (long) i * QUAD);
+            for (int k = 0; k < 4; k++) {
+                float x = Float.intBitsToFloat(v[k * stride]), y = Float.intBitsToFloat(v[k * stride + 1]),
+                    z = Float.intBitsToFloat(v[k * stride + 2]);
+                float u = Float.intBitsToFloat(v[k * stride + 4]), w = Float.intBitsToFloat(v[k * stride + 5]);
+                float su = (u - sp.getU0()) / (sp.getU1() - sp.getU0()) * 16f;
+                float sv = (w - sp.getV0()) / (sp.getV1() - sp.getV0()) * 16f;
+                buf.putShort(o + k * 10, (short) Math.round(x * 256));
+                buf.putShort(o + k * 10 + 2, (short) Math.round(y * 256));
+                buf.putShort(o + k * 10 + 4, (short) Math.round(z * 256));
+                buf.putShort(o + k * 10 + 6, (short) Math.round(su * 16));
+                buf.putShort(o + k * 10 + 8, (short) Math.round(sv * 16));
+            }
+            buf.put(o + 40, (byte) texOf[i]);
+            int shade = !q.isShade() ? 255 : switch (q.getDirection()) {
+                case UP -> 255;
+                case DOWN -> 128;
+                case NORTH, SOUTH -> 204;
+                default -> 153;
+            };
+            buf.put(o + 41, (byte) shade);
+        }
+        buf.putInt((int) m, quads.size());
+        publish(id, slot);
+        return true;
+    }
+
     private static void writeEntry(int id, int kind, int flags, AABB box, int[][] faces) {
-        if (slots >= MAX_SLOTS) return;
+        int slot = writeEntry(id, kind, flags, box, faces, false);
+        if (slot < 0) return;
+        buf.putInt((int) (MODELS + (long) slot * MODEL), 0); // no model left over from an earlier session
+        publish(id, slot);
+    }
+
+    private static void publish(int id, int slot) {
+        VarHandle.releaseFence();
+        buf.putShort(HEADER + id * 2, (short) (slot + 1));
+        VarHandle.releaseFence();
+        buf.putInt(8, slots);
+    }
+
+    /** Writes a slot's header and textures; publishes it right away unless a model still has to be added. */
+    private static int writeEntry(int id, int kind, int flags, AABB box, int[][] faces, boolean publishNow) {
+        if (slots >= MAX_SLOTS) return -1;
         int slot = slots++;
         int e = HEADER + TABLE + slot * ENTRY;
         buf.put(e, (byte) kind);
@@ -199,10 +348,8 @@ public final class BlockTextures {
                 buf.put(o + i * 4 + 3, (byte) (argb >>> 24));
             }
         }
-        VarHandle.releaseFence();
-        buf.putShort(HEADER + id * 2, (short) (slot + 1));
-        VarHandle.releaseFence();
-        buf.putInt(8, slots);
+        if (publishNow) publish(id, slot);
+        return slot;
     }
 
     private static int clamp16(double v) {

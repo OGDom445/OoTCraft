@@ -1,0 +1,49 @@
+name: Bug report
+description: Something broke, crashed or looks wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Quick questions are often faster on the [Discord](https://discord.gg/w5sxzdPtT7).
+        **Never attach ROMs, game files or links to them.**
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where in the game?
+      placeholder: "e.g. Kokiri Forest, crawl tunnel near the training area"
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - Minecraft (first person)
+        - Link (third person, F5)
+        - Both / switching between them
+        - Not sure
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Attach or paste the relevant part of `Shipwright/x64/Release/logs/Ship of Harkinian.log` (Zelda side, crash
+        tracebacks) and `%APPDATA%\.ootcraft\logs\latest.log` (Minecraft side).
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: OoTCraft version or commit
+  - type: checkboxes
+    id: own
+    attributes:
+      label: Confirmation
+      options:
+        - label: I own Ocarina of Time (my own ROM dump) and Minecraft Java Edition.
+          required: true

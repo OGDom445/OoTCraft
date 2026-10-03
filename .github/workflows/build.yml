@@ -1,0 +1,63 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  mod:
+    name: Minecraft mod
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Build ootmc
+        working-directory: ootmc
+        run: |
+          chmod +x gradlew
+          ./gradlew build --console=plain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ootmc-jar
+          path: ootmc/build/libs/ootmc-*.jar
+
+  patch:
+    name: Ship of Harkinian patch applies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the patch against Ship of Harkinian 9.2.3
+        run: |
+          git clone --filter=blob:none https://github.com/HarbourMasters/Shipwright.git soh-upstream
+          cd soh-upstream
+          git checkout cb71e22
+          git apply --check --whitespace=nowarn ../soh/ootcraft-soh-9.2.3.patch
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [mod, patch]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ootmc-jar
+          path: dist
+      - name: Publish the mod jar (OoTCraft code only)
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ootmc-*.jar
+          body: |
+            Download the source (zip) below, extract it, and double-click **Install-OoTCraft.bat**.
+            The installer uses this release's mod jar and builds Ship of Harkinian on your PC.
+            You need your own Ocarina of Time ROM and Minecraft: Java Edition. See LEGAL.md.
+            Community: https://discord.gg/w5sxzdPtT7

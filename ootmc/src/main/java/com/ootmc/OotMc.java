@@ -58,6 +58,8 @@ public class OotMc implements ModInitializer {
     private final Set<Long> sentSections = new HashSet<>();
     private final Map<Long, Integer> sectionSlots = new LinkedHashMap<>(16, 0.75f, true);
     private int nextSlot = 0;
+    /** What each section slot last held (sx, sy, sz, scene), so a new world can blank them in Zelda */
+    private final int[][] slotWhat = new int[Bridge.SECTION_SLOTS][];
     private int lastScene = -1;
     private int lastAge = -1;
     private final ArrayDeque<long[]> waterQueue = new ArrayDeque<>();
@@ -89,6 +91,7 @@ public class OotMc implements ModInitializer {
         // Proof of what's under Hyrule: a core sample under Kokiri Forest on every start, and /ootcore for anywhere
         net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents.SERVER_STARTED.register(server ->
             {
+                forgetPublished();
                 LOGGER.info("[OoTCraft] {}", Underground.coreSample(server, Bridge.originX(85) - 2, 28));
                 LOGGER.info("[OoTCraft] {}", Underground.featureScan(server, Bridge.originX(85) - 2, 28, 4));
             });
@@ -134,6 +137,8 @@ public class OotMc implements ModInitializer {
         hyrule.setDayTime(6000);
         // Survival: Minecraft health is the real one (Zelda's hearts mirror it)
         player.setGameMode(GameType.SURVIVAL);
+        // Every 1.21 recipe in the recipe book from the start (crafting itself never needed unlocking)
+        player.awardRecipes(player.server.getRecipeManager().getRecipes());
         // A starter hotbar the first time (the inventory screen isn't drawn into Zelda yet)
         boolean emptyHotbar = true;
         for (int i = 0; i < 9; i++) if (!player.getInventory().getItem(i).isEmpty()) emptyHotbar = false;
@@ -365,6 +370,30 @@ public class OotMc implements ModInitializer {
             sectionSlots.put(key, slot);
         }
         bridge.writeSection(slot, sx, sy, sz, scene, ids, nonAir);
+        slotWhat[slot] = new int[] { sx, sy, sz, scene };
+    }
+
+    /**
+     * A (new) world started: every block this JVM showed Zelda belongs to the old one. Blank them in Zelda and start
+     * publishing from scratch (the reset-world option deletes the world and makes a fresh one in the same session).
+     */
+    private void forgetPublished() {
+        Bridge bridge = Bridge.get();
+        if (bridge != null) {
+            Arrays.fill(ids, (short) 0);
+            for (int slot = 0; slot < slotWhat.length; slot++) {
+                int[] w = slotWhat[slot];
+                if (w != null) bridge.writeSection(slot, w[0], w[1], w[2], w[3], ids, 0);
+                slotWhat[slot] = null;
+            }
+        }
+        sectionSlots.clear();
+        sentSections.clear();
+        nextSlot = 0;
+        lastScene = -1;
+        waterBuilt.clear();
+        waterQueue.clear();
+        DIRTY_SECTIONS.clear();
     }
 
     // ---- Zelda's water boxes become invisible water volumes, filled down to the scene floor

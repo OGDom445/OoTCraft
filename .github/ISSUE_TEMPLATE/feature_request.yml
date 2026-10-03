@@ -1,0 +1,22 @@
+name: Feature idea
+description: Suggest something new for OoTCraft
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What should OoTCraft do, and why would it be fun?
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How might it work?
+      description: Optional. Any thoughts on the Zelda side, the Minecraft side, or the controls.
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Helping out
+      options:
+        - label: I'd like to help build this

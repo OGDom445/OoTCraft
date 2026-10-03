@@ -2,7 +2,7 @@
 	"required": true,
 	"package": "com.ootmc.mixin.client",
 	"compatibilityLevel": "JAVA_21",
-	"client": ["MouseHandlerMixin", "GameRendererAccessor", "KeyboardHandlerInvoker", "BackupConfirmScreenAccessor", "GameRendererPickMixin", "LevelRendererMixin", "WindowMixin", "ScreenEffectMixin", "GuiOverlayMixin", "SpriteContentsAccessor", "MinecraftAttackMixin", "GameModeAccessor", "ToastMixin"],
+	"client": ["MouseHandlerMixin", "GameRendererAccessor", "KeyboardHandlerInvoker", "BackupConfirmScreenAccessor", "GameRendererPickMixin", "LevelRendererMixin", "WindowMixin", "ScreenEffectMixin", "GuiOverlayMixin", "SpriteContentsAccessor", "MinecraftAttackMixin", "GameModeAccessor", "ToastMixin", "WindowSizeAccessor", "ScreenBlurMixin"],
 	"injectors": { "defaultRequire": 1 },
 	"overwrites": { "requireAnnotations": true }
 }

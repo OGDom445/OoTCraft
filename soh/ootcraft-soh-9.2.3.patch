@@ -20,10 +20,10 @@ index 70ea296..ae67cb3 100644
  extern "C" ActorDBEntry* ActorDB_Retrieve(const int id) {
 diff --git a/soh/soh/Enhancements/Minecraft/Bridge.h b/soh/soh/Enhancements/Minecraft/Bridge.h
 new file mode 100644
-index 0000000..8cb89ed
+index 0000000..6248aa1
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/Bridge.h
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,279 @@
 +#pragma once
 +
 +// OoTCraft shared-memory bridge between Ship of Harkinian and the hidden Minecraft client ("ootmc" Fabric mod).
@@ -74,7 +74,8 @@ index 0000000..8cb89ed
 +    EV_BLAST = 44,        // x, y, z = explosion centre (Minecraft block), radius = blocks * 10
 +    EV_USE_ZELDA_ITEM = 45, // x = OoT item id: Steve used the Minecraft version of a Zelda item
 +    EV_VOID_OUT = 46,       // Steve fell out of the world: respawn at the entrance, like falling into a pit
-+    EV_CELL_AIR = 47,       // x, y, z = a dug block turned out to be open air underground (cave, mineshaft...)
++    EV_CELL_AIR = 47,
++    EV_RESET_WORLD = 48,    // delete Minecraft's world and start a fresh one (Esc menu option)       // x, y, z = a dug block turned out to be open air underground (cave, mineshaft...)
 +};
 +
 +enum HitKind : int32_t {
@@ -102,6 +103,7 @@ index 0000000..8cb89ed
 +    MC_SNEAKING = 1 << 4,
 +    MC_DEAD = 1 << 5,
 +    MC_THIRD_PERSON = 1 << 6,
++    MC_CRAWLING = 1 << 7, // crawl pose (low gaps, Zelda crawlspaces)
 +};
 +
 +struct alignas(64) Header {
@@ -143,7 +145,7 @@ index 0000000..8cb89ed
 +    uint8_t selectedSlot;
 +    int8_t destroyStage;                  // block being mined: crack stage 0-9, -1 none
 +    int32_t destroyX, destroyY, destroyZ; // that block (Minecraft coordinates)
-+    uint8_t _pad[4];
++    uint32_t timeUs;                      // when this view was sampled: QueryPerformanceCounter in microseconds
 +};
 +
 +struct alignas(64) InputState { // written by Zelda; counters only grow so Minecraft can diff them
@@ -303,10 +305,10 @@ index 0000000..8cb89ed
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/Minecraft.h b/soh/soh/Enhancements/Minecraft/Minecraft.h
 new file mode 100644
-index 0000000..1b3b39f
+index 0000000..10e3770
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/Minecraft.h
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,124 @@
 +#pragma once
 +
 +// "Minecraft Mode": first-person Steve, placeable/breakable blocks and a Minecraft-style HUD layered on top of
@@ -378,6 +380,12 @@ index 0000000..1b3b39f
 +
 +// Minecraft bridge (shared memory with the hidden ootmc Minecraft client)
 +bool BridgeConnected();
++// Esc menu "Reset Minecraft World": a fresh Minecraft world and Hyrule's ground restored (all digs forgotten)
++void ResetWorld();
++void OpenMinecraftLauncher();
++void KeepLinkWithSteve();
++void ForgetDigs();
++void ClearBlockWorld();
 +void BridgeRequestExplosion(const Vec3f& pos, int radiusBlocks);
 +void PushEvent(uint8_t type, int32_t x, int32_t y, int32_t z);
 +void RequestTeleport(const Vec3f& pos, s16 yaw);
@@ -391,6 +399,7 @@ index 0000000..1b3b39f
 +void SyncZeldaItems(PlayState* play);
 +void UseZeldaItem(PlayState* play, int item);
 +void RequestItemHandoff(PlayState* play, int slot, int item);
++void RestoreCLeft(PlayState* play);
 +struct TerrainPiece {
 +    float v[9];
 +    void* src; // the CollisionPoly it was cut from
@@ -426,10 +435,10 @@ index 0000000..1b3b39f
 +#endif
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftBlocks.cpp b/soh/soh/Enhancements/Minecraft/MinecraftBlocks.cpp
 new file mode 100644
-index 0000000..e29552f
+index 0000000..5583eed
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftBlocks.cpp
-@@ -0,0 +1,809 @@
+@@ -0,0 +1,898 @@
 +#include "Minecraft.h"
 +
 +#include <algorithm>
@@ -567,10 +576,20 @@ index 0000000..e29552f
 +namespace BlockTex {
 +constexpr uint32_t MAGIC = 0x58455442; // "BTEX"
 +constexpr size_t HEADER = 64, TABLE = 65536 * 2, ENTRY = 16 + 6 * 1024, MAX_SLOTS = 2048;
-+constexpr size_t SIZE = HEADER + TABLE + ENTRY * MAX_SLOTS;
++constexpr size_t MAX_QUADS = 128, QUAD = 44, MODEL = 4 + MAX_QUADS * QUAD;
++constexpr size_t MODELS = HEADER + TABLE + ENTRY * MAX_SLOTS;
++constexpr size_t SIZE = MODELS + MODEL * MAX_SLOTS;
 +} // namespace BlockTex
 +
-+enum : u8 { KIND_BOX = 0, KIND_CROSS = 1 };
++enum : u8 { KIND_BOX = 0, KIND_CROSS = 1, KIND_MODEL = 2 };
++
++// One quad of a block's real Minecraft model (fire, torches, plants, stairs, fences...)
++struct ModelQuad {
++    f32 pos[4][3]; // sixteenths of a block
++    f32 uv[4][2];  // texels
++    u8 tex;        // which of the block's 6 textures
++    u8 shade;
++};
 +enum : u8 { FLAG_OCCLUDES = 1, FLAG_COLLIDES = 2, FLAG_CUTOUT = 4, FLAG_WOOD = 8 };
 +
 +struct BlockInfo {
@@ -579,6 +598,7 @@ index 0000000..e29552f
 +    u8 lo[3] = { 0, 0, 0 };    // box min, sixteenths of a block
 +    u8 hi[3] = { 16, 16, 16 }; // box max
 +    alignas(8) u8 tex[6][16 * 16 * 4]; // RGBA32 per face: -x,+x,-y,+y,-z,+z
++    std::vector<ModelQuad> model;      // KIND_MODEL: drawn instead of the box (the box still collides)
 +};
 +
 +#ifdef _WIN32
@@ -674,6 +694,28 @@ index 0000000..e29552f
 +        info->hi[i] = std::min<u8>(std::max<u8>(e[5 + i], info->lo[i]), 16);
 +    }
 +    memcpy(info->tex, e + 16, sizeof(info->tex));
++    if (info->kind == KIND_MODEL) {
++        const u8* m = sTexView + BlockTex::MODELS + (size_t)(slot - 1) * BlockTex::MODEL;
++        uint32_t n = std::min<uint32_t>(*(const uint32_t*)m, BlockTex::MAX_QUADS);
++        for (uint32_t i = 0; i < n; i++) {
++            const u8* q = m + 4 + i * BlockTex::QUAD;
++            ModelQuad mq{};
++            for (int k = 0; k < 4; k++) {
++                const s16* v = (const s16*)(q + k * 10);
++                for (int a = 0; a < 3; a++) {
++                    mq.pos[k][a] = v[a] / 16.0f; // 1/256 block -> sixteenths
++                }
++                mq.uv[k][0] = v[3] / 16.0f;
++                mq.uv[k][1] = v[4] / 16.0f;
++            }
++            mq.tex = std::min<u8>(q[40], 5);
++            mq.shade = q[41];
++            info->model.push_back(mq);
++        }
++        if (info->model.empty()) {
++            info->kind = KIND_CROSS;
++        }
++    }
 +    sInfos[id] = info;
 +    return info;
 +}
@@ -735,14 +777,14 @@ index 0000000..e29552f
 +}
 +
 +// Model units for a position in sixteenths of a block
-+s16 Sixteenths(int g) {
++s16 Sixteenths(f32 g) {
 +    return (s16)lroundf(g * (BLOCK_SIZE / 16.0f));
 +}
 +
 +void RebuildMesh(Chunk* c) {
 +    struct Quad {
-+        int g[4][3]; // corners, sixteenths of a block within the chunk
-+        int uv[4][2];
++        f32 g[4][3]; // corners, sixteenths of a block within the chunk
++        f32 uv[4][2];
 +        u8 shade;
 +        const u8* tex;
 +        bool cutout;
@@ -795,6 +837,24 @@ index 0000000..e29552f
 +                    continue;
 +                }
 +
++                if (b->kind == KIND_MODEL) {
++                    // Minecraft's own model, quad for quad (already wound to face out)
++                    for (const ModelQuad& mq : b->model) {
++                        Quad q{};
++                        for (int k = 0; k < 4; k++) {
++                            for (int a = 0; a < 3; a++) {
++                                q.g[k][a] = org[a] + mq.pos[k][a];
++                            }
++                            q.uv[k][0] = mq.uv[k][0];
++                            q.uv[k][1] = mq.uv[k][1];
++                        }
++                        q.shade = mq.shade;
++                        q.tex = b->tex[mq.tex];
++                        q.cutout = true;
++                        quads.push_back(q);
++                    }
++                }
++
 +                bool collides = (b->flags & FLAG_COLLIDES) != 0;
 +                for (int f = 0; f < 6; f++) {
 +                    bool hiddenVisual = false, hiddenCollision = false;
@@ -812,12 +872,18 @@ index 0000000..e29552f
 +                        corners[k][1] = org[1] + (cr.y ? b->hi[1] : b->lo[1]);
 +                        corners[k][2] = org[2] + (cr.z ? b->hi[2] : b->lo[2]);
 +                    }
-+                    if (!hiddenVisual) {
++                    if (!hiddenVisual && b->kind != KIND_MODEL) {
 +                        Quad q{};
-+                        memcpy(q.g, corners, sizeof(corners));
 +                        for (int k = 0; k < 4; k++) {
-+                            FaceUv(f, corners[k][0] - org[0], corners[k][1] - org[1], corners[k][2] - org[2],
-+                                   q.uv[k][0], q.uv[k][1]);
++                            for (int a = 0; a < 3; a++) {
++                                q.g[k][a] = (f32)corners[k][a];
++                            }
++                        }
++                        for (int k = 0; k < 4; k++) {
++                            int s, t;
++                            FaceUv(f, corners[k][0] - org[0], corners[k][1] - org[1], corners[k][2] - org[2], s, t);
++                            q.uv[k][0] = (f32)s;
++                            q.uv[k][1] = (f32)t;
 +                        }
 +                        q.shade = kFaceShade[f];
 +                        q.tex = b->tex[f];
@@ -849,8 +915,8 @@ index 0000000..e29552f
 +                v.v.ob[0] = Sixteenths(q.g[i][0]);
 +                v.v.ob[1] = Sixteenths(q.g[i][1]);
 +                v.v.ob[2] = Sixteenths(q.g[i][2]);
-+                v.v.tc[0] = (s16)(q.uv[i][0] << 5);
-+                v.v.tc[1] = (s16)(q.uv[i][1] << 5);
++                v.v.tc[0] = (s16)lroundf(q.uv[i][0] * 32.0f);
++                v.v.tc[1] = (s16)lroundf(q.uv[i][1] * 32.0f);
 +                v.v.cn[0] = q.shade;
 +                v.v.cn[1] = q.shade;
 +                v.v.cn[2] = q.shade;
@@ -1046,16 +1112,32 @@ index 0000000..e29552f
 +    if (crack == nullptr) {
 +        return nullptr;
 +    }
++    // Minecraft multiplies its crack textures onto the block (white = no change, dark lines darken). Ordinary
++    // transparency would paint the white over the block, so turn each one into dark lines on a clear background.
++    static const u8* sConvertedFrom[10] = {};
++    alignas(8) static u8 sCrackTex[10][16 * 16 * 4];
++    int stage = mc->destroyStage;
++    if (sConvertedFrom[stage] != crack->tex[0]) {
++        sConvertedFrom[stage] = crack->tex[0];
++        for (int i = 0; i < 256; i++) {
++            const u8* src = crack->tex[0] + i * 4;
++            u8* dst = sCrackTex[stage] + i * 4;
++            int lum = (src[0] * 30 + src[1] * 59 + src[2] * 11) / 100;
++            int a = (255 - lum) * src[3] / 255;
++            dst[0] = dst[1] = dst[2] = 0;
++            dst[3] = (u8)std::min(255, a * 3 / 2);
++        }
++    }
 +    const BlockInfo* b = Info(c->blocks[lx][ly][lz]);
 +    u8 lo[3] = { 0, 0, 0 }, hi[3] = { 16, 16, 16 };
-+    if (b != nullptr && b->kind == KIND_BOX) {
++    if (b != nullptr && b->kind != KIND_CROSS) { // boxes and real models: their outline (slabs, stairs, fences...)
 +        memcpy(lo, b->lo, 3);
 +        memcpy(hi, b->hi, 3);
 +    }
 +    static Vtx sVtx[24];
 +    static Gfx sGfx[48];
 +    const int org[3] = { lx * 16, ly * 16, lz * 16 };
-+    const f32 grow = 0.4f; // just outside the block so the cracks sit on its surface
++    const f32 grow = 0.75f; // just outside the block so the cracks sit on its surface without flickering
 +    for (int f = 0; f < 6; f++) {
 +        for (int k = 0; k < 4; k++) {
 +            const Corner& cr = kFaceCorners[f][3 - k];
@@ -1080,7 +1162,7 @@ index 0000000..e29552f
 +    gDPSetTextureFilter(g++, G_TF_POINT);
 +    gSPTexture(g++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
 +    gDPSetCombineMode(g++, G_CC_MODULATEIDECALA, G_CC_MODULATEIDECALA);
-+    gDPLoadTextureBlock(g++, (void*)crack->tex[0], G_IM_FMT_RGBA, G_IM_SIZ_32b, 16, 16, 0, G_TX_NOMIRROR | G_TX_WRAP,
++    gDPLoadTextureBlock(g++, (void*)sCrackTex[stage], G_IM_FMT_RGBA, G_IM_SIZ_32b, 16, 16, 0, G_TX_NOMIRROR | G_TX_WRAP,
 +                        G_TX_NOMIRROR | G_TX_WRAP, 4, 4, G_TX_NOLOD, G_TX_NOLOD);
 +    for (int batch = 0; batch < 3; batch++) {
 +        gSPVertex(g++, (uintptr_t)&sVtx[batch * 8], 8, 0);
@@ -1227,6 +1309,22 @@ index 0000000..e29552f
 +    sChunkActorId = ActorDB::Instance->AddEntry(init).entry.id;
 +}
 +
++
++// Forget every block Minecraft ever sent (the world was reset). Only called right after a scene (re)load, when the
++// chunk actors of the old scene are already gone.
++void ClearBlockWorld() {
++    for (auto& [scene, chunks] : sWorld) {
++        for (auto& [key, c] : chunks) {
++            if (c->actor != nullptr) {
++                c->actor->chunk = nullptr;
++            }
++            delete c;
++        }
++    }
++    sWorld.clear();
++    sKnownSections.clear();
++}
++
 +} // namespace Minecraft
 +
 +extern "C" void Minecraft_AdjustCollisionLimits(void* colCtxPtr) {
@@ -1241,10 +1339,10 @@ index 0000000..e29552f
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
 new file mode 100644
-index 0000000..1a3ccca
+index 0000000..988802d
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
-@@ -0,0 +1,637 @@
+@@ -0,0 +1,727 @@
 +﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -1259,11 +1357,13 @@ index 0000000..1a3ccca
 +#include "soh/ShipInit.hpp"
 +#include "soh/Enhancements/game-interactor/GameInteractor.h"
 +#include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
++#include "soh/Notification/Notification.h"
 +
 +#ifdef _WIN32
 +#define WIN32_LEAN_AND_MEAN
 +#define NOMINMAX
 +#include <Windows.h>
++#include <shellapi.h>
 +#endif
 +
 +extern "C" {
@@ -1366,6 +1466,9 @@ index 0000000..1a3ccca
 +uint64_t sLastMcHeartbeat = 0;
 +int sFramesSinceMcBeat = 0; // counts up from boot so an already-running Minecraft can reconnect first
 +int sExportedScene = -1;
++bool sResetPending = false;    // menu asked for a world reset
++bool sAwaitingReload = false;  // ...the area is reloading; finish once the new scene is up
++bool sSceneInitSeen = false;
 +uint32_t sMeshVersion = 0;
 +uint32_t sTeleportSeq = 0;
 +Vec3f sTeleportPos{};
@@ -1421,6 +1524,11 @@ index 0000000..1a3ccca
 +    u32 wallType = func_80041D94(colCtx, poly, bgId); // wall type: 2 ladder, 3 ladder top, 4 vines
 +    if (wallType == 2 || wallType == 3 || wallType == 4) {
 +        flags |= 2;
++    }
++    // Crawlspace walls: Zelda closes each crawlspace mouth with a wall Link only crawls through on A. Steve crawls
++    // through them instead (only as a child, like Link)
++    if (!LINK_IS_ADULT && (func_80041DB8(colCtx, poly, bgId) & 0x30)) {
++        flags |= 4;
 +    }
 +    return flags;
 +}
@@ -1657,9 +1765,58 @@ index 0000000..1a3ccca
 +}
 +#endif
 +
++bool sLauncherOpened = false; // the official launcher is opened once per session (the player presses Play)
++
++// Players start Minecraft from their own Minecraft Launcher, with the "OoTCraft" profile the installer added: it only
++// runs for an owned game on a Microsoft account. The Gradle dev client below is for contributors only.
++void OpenOfficialLauncher() {
++#ifdef _WIN32
++    const char* candidates[] = {
++        "%ProgramFiles(x86)%\\Minecraft Launcher\\MinecraftLauncher.exe",
++        "%ProgramFiles%\\Minecraft Launcher\\MinecraftLauncher.exe",
++        "%LOCALAPPDATA%\\Programs\\Minecraft Launcher\\MinecraftLauncher.exe",
++        "C:\\XboxGames\\Minecraft Launcher\\Content\\Minecraft.exe",
++    };
++    bool opened = false;
++    for (const char* c : candidates) {
++        char path[MAX_PATH];
++        if (ExpandEnvironmentStringsA(c, path, MAX_PATH) && GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
++            opened = (INT_PTR)ShellExecuteA(nullptr, "open", path, nullptr, nullptr, SW_SHOWNORMAL) > 32;
++            if (opened) {
++                break;
++            }
++        }
++    }
++    if (!opened) { // Microsoft Store / Xbox app install
++        opened = (INT_PTR)ShellExecuteA(nullptr, "open",
++                                        "shell:AppsFolder\\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft", nullptr,
++                                        nullptr, SW_SHOWNORMAL) > 32;
++    }
++    if (opened) {
++        SPDLOG_INFO("[OoTCraft] opened the Minecraft Launcher");
++        Notification::Emit({ .prefix = "OoTCraft",
++                             .message = "Minecraft Launcher opened: choose the OoTCraft profile and press Play",
++                             .remainingTime = 15.0f });
++    } else {
++        SPDLOG_ERROR("[OoTCraft] couldn't find the Minecraft Launcher");
++        Notification::Emit({ .prefix = "OoTCraft",
++                             .message = "Minecraft Launcher not found: install it from minecraft.net, then run the "
++                                        "OoTCraft installer again",
++                             .remainingTime = 15.0f });
++    }
++#endif
++}
++
 +void LaunchMinecraft() {
 +#ifdef _WIN32
 +    if (sLaunchCooldown > 0 || !CVarGetInteger(CVAR_MINECRAFT("AutoLaunch"), 1)) {
++        return;
++    }
++    if (!CVarGetInteger(CVAR_MINECRAFT("DevClient"), 0)) {
++        if (!sLauncherOpened) {
++            sLauncherOpened = true;
++            OpenOfficialLauncher();
++        }
 +        return;
 +    }
 +    sLaunchCooldown = 20 * 120; // give Minecraft two minutes to start before trying again
@@ -1718,9 +1875,29 @@ index 0000000..1a3ccca
 +    if (gPlayState == nullptr || Bridge::Get() == nullptr) {
 +        return;
 +    }
++    KeepLinkWithSteve();
 +    PlayState* play = gPlayState;
 +    Player* p = GET_PLAYER(play);
 +    Bridge::Layout* L = Bridge::Get();
++    // World reset (Esc menu): forget every dig, tell Minecraft to make a new world, and reload this area so Hyrule's
++    // ground comes back whole
++    if (sResetPending && play->transitionTrigger == TRANS_TRIGGER_OFF && play->transitionMode == TRANS_MODE_OFF) {
++        sResetPending = false;
++        ForgetDigs();
++        PushEvent(Bridge::EV_RESET_WORLD, 0, 0, 0);
++        sSceneInitSeen = false;
++        sAwaitingReload = true;
++        play->nextEntranceIndex = gSaveContext.entranceIndex;
++        play->transitionTrigger = TRANS_TRIGGER_START;
++        play->transitionType = TRANS_TYPE_FADE_BLACK;
++        SPDLOG_INFO("[OoTCraft] resetting the Minecraft world and Hyrule's dug ground");
++    }
++    if (sAwaitingReload && sSceneInitSeen) {
++        sAwaitingReload = false;
++        ClearBlockWorld();
++        sExportedScene = -1;
++        sLastScene = -1; // run the new-scene setup below with nothing dug
++    }
 +    // New scene (or reloaded play state): move Minecraft's player to Link's spawn before the puppet resumes
 +    if (p != nullptr && (play->sceneNum != sLastScene || (void*)play != sLastPlay)) {
 +        sLastScene = play->sceneNum;
@@ -1789,6 +1966,7 @@ index 0000000..1a3ccca
 +    }
 +    COND_HOOK(OnGameFrameUpdate, enabled, OnGameFrame);
 +    COND_HOOK(OnPlayerUpdate, enabled, OnPlayerUpdateBridge);
++    COND_HOOK(OnSceneInit, enabled, [](int16_t) { sSceneInitSeen = true; });
 +}
 +
 +static RegisterShipInitFunc sInit(RegisterBridge, { CVAR_MINECRAFT_ENABLED });
@@ -1881,13 +2059,23 @@ index 0000000..1a3ccca
 +    return L != nullptr ? &L->input : nullptr;
 +}
 +
++
++void ResetWorld() {
++    sResetPending = true;
++}
++
++// Esc menu: open the Minecraft Launcher again (e.g. after closing Minecraft)
++void OpenMinecraftLauncher() {
++    OpenOfficialLauncher();
++}
++
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftCombat.cpp b/soh/soh/Enhancements/Minecraft/MinecraftCombat.cpp
 new file mode 100644
-index 0000000..4ce7f90
+index 0000000..2e004f1
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftCombat.cpp
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,305 @@
 +#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -2115,6 +2303,17 @@ index 0000000..4ce7f90
 +        return;
 +    }
 +    s16 cur = gSaveContext.health;
++    // A file load or area (re)load sets Zelda's hearts outright; that's not damage (it used to kill Steve on load)
++    static PlayState* sLastPlay = nullptr;
++    static s32 sLastFile = -1;
++    static s16 sLastScene = -1;
++    if (play != sLastPlay || gSaveContext.fileNum != sLastFile || play->sceneNum != sLastScene ||
++        play->transitionTrigger != TRANS_TRIGGER_OFF || gSaveContext.gameMode != GAMEMODE_NORMAL) {
++        sLastPlay = play;
++        sLastFile = gSaveContext.fileNum;
++        sLastScene = play->sceneNum;
++        sLastHealth = -1;
++    }
 +    if (sLastHealth >= 0 && cur != sLastHealth) {
 +        if (cur < sLastHealth) {
 +            PushEvent(Bridge::EV_PLAYER_HURT, sLastHealth - cur, 0, 0);
@@ -2184,14 +2383,16 @@ index 0000000..4ce7f90
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
 new file mode 100644
-index 0000000..6cfc010
+index 0000000..25f306b
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
-@@ -0,0 +1,543 @@
+@@ -0,0 +1,797 @@
 +#include "Minecraft.h"
 +#include "Bridge.h"
 +
++#include <algorithm>
 +#include <cmath>
++#include <cstdlib>
 +
 +#include <libultraship/libultraship.h>
 +#include <ship/window/Window.h>
@@ -2205,6 +2406,8 @@ index 0000000..6cfc010
 +#define WIN32_LEAN_AND_MEAN
 +#define NOMINMAX
 +#include <Windows.h>
++#include <DbgHelp.h>
++#pragma comment(lib, "dbghelp.lib")
 +#endif
 +
 +extern "C" {
@@ -2237,8 +2440,11 @@ index 0000000..6cfc010
 +bool sPrevVk[256] = {};
 +bool sPrevLmb = false, sPrevRmb = false, sPrevMmb = false;
 +bool sMouseCaptured = false;
++extern "C" void Player_MinecraftSetCrawling(PlayState* play, Player* player, s32 crawl);
++
 +bool sPuppetActive = false;
 +bool sFpActiveThisFrame = false;
++u32 sFpFrame = 0xFFFFFFFF; // gameplay frame the first-person view was last applied on
 +Vec3f sPuppetPos{};
 +uint32_t sZeldaPrevSynth = 0;
 +int32_t sMouseDxTotal = 0, sMouseDyTotal = 0, sWheelTotal = 0;
@@ -2320,6 +2526,29 @@ index 0000000..6cfc010
 +    return mods;
 +}
 +#endif
++
++// Name of a function in this build (for diagnostics), via the PDB next to soh.exe
++std::string SymbolName(void* addr) {
++#ifdef _WIN32
++    static bool sInit = false;
++    if (!sInit) {
++        sInit = true;
++        SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
++        SymInitialize(GetCurrentProcess(), nullptr, TRUE);
++    }
++    alignas(SYMBOL_INFO) char buf[sizeof(SYMBOL_INFO) + 256];
++    SYMBOL_INFO* sym = (SYMBOL_INFO*)buf;
++    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
++    sym->MaxNameLen = 255;
++    DWORD64 disp = 0;
++    if (SymFromAddr(GetCurrentProcess(), (DWORD64)addr, &disp, sym)) {
++        return sym->Name;
++    }
++#endif
++    char hex[32];
++    snprintf(hex, sizeof(hex), "%p", addr);
++    return hex;
++}
 +
 +bool PlayerFrozen(PlayState* play, Player* player) {
 +    if (play->transitionTrigger != TRANS_TRIGGER_OFF || play->transitionMode != TRANS_MODE_OFF) {
@@ -2477,6 +2706,15 @@ index 0000000..6cfc010
 +        }
 +    }
 +    bool mcScreen = mc != nullptr && (mc->flags & Bridge::MC_SCREEN_OPEN);
++    if (!sLinkMode && !PlayerFrozen(play, player) && sPendingItemPress == 0) {
++        RestoreCLeft(play);
++    }
++    // Minecraft's menus use the system cursor, which Ship of Harkinian hides during gameplay: show it while one is open
++    static bool sCursorForced = false;
++    if (mcScreen != sCursorForced) {
++        sCursorForced = mcScreen;
++        Window()->SetForceCursorVisibility(mcScreen || CVarGetInteger(CVAR_SETTING("CursorVisibility"), 0));
++    }
 +
 +    s32 mdx = 0, mdy = 0;
 +    Mouse_GetDelta(&mdx, &mdy);
@@ -2555,6 +2793,8 @@ index 0000000..6cfc010
 +    static bool sWasZeldaControlled = false;
 +    bool zeldaControlled = frozen || sLinkMode;
 +    if (sWasZeldaControlled && !zeldaControlled) {
++        SPDLOG_INFO("[OoTCraft] Zelda gave control back: Steve to Link at ({:.0f},{:.0f},{:.0f})",
++                    player->actor.world.pos.x, player->actor.world.pos.y, player->actor.world.pos.z);
 +        RequestTeleport(player->actor.world.pos, player->actor.shape.rot.y);
 +    }
 +    sWasZeldaControlled = zeldaControlled;
@@ -2576,6 +2816,7 @@ index 0000000..6cfc010
 +        player->actor.colChkInfo.displacement = { 0, 0, 0 }; // already applied above
 +        player->actor.world.pos = sPuppetPos;
 +        player->actor.prevPos = sPuppetPos;
++        player->actor.home.pos = sPuppetPos; // Player_Update starts each frame from home.pos (prevPos = home)
 +        player->actor.velocity = { 0, 0, 0 };
 +        player->actor.speedXZ = 0.0f;
 +        player->actor.shape.rot.y = mc->yaw;
@@ -2587,6 +2828,46 @@ index 0000000..6cfc010
 +        player->fallStartHeight = (s16)player->actor.world.pos.y;
 +        player->fallDistance = 0;
 +    }
++
++    // Crawling: Link crawls whenever Steve does, so Steve's model crawls through Zelda's crawlspaces and switching
++    // to Link mid-tunnel carries on crawling (Zelda's own crawl then takes him out the other end). Getting up waits
++    // a few frames so a teleport back from Link mode doesn't stand him up in the tunnel for one frame.
++    static int sStandFrames = 0;
++    static int sOpenSkyFrames = 0;
++    static bool sCrawlFromSteve = false; // Link's crawl was started by Steve's, not by Zelda's own crawlspace entry
++    if (!(player->stateFlags2 & PLAYER_STATE2_CRAWLING)) {
++        sCrawlFromSteve = false;
++    }
++    if (sLinkMode && sCrawlFromSteve && (player->stateFlags2 & PLAYER_STATE2_CRAWLING)) {
++        // Link carried on crawling from Steve: once he's out from under any low ceiling, stand him up (Zelda only
++        // ends a crawl at a crawlspace's exit wall, so outside a tunnel he would crawl forever)
++        Vec3f head = player->actor.world.pos;
++        f32 ceilY;
++        CollisionPoly* poly;
++        s32 bgId;
++        if (!BgCheck_EntityCheckCeiling(&play->colCtx, &ceilY, &head, 45.0f, &poly, &bgId, &player->actor)) {
++            if (++sOpenSkyFrames > 6) {
++                Player_MinecraftSetCrawling(play, player, false);
++            }
++        } else {
++            sOpenSkyFrames = 0;
++        }
++    } else {
++        sOpenSkyFrames = 0;
++    }
++    // Minecraft mode: Steve leads and his body is hidden in first person, so Link stays out of Zelda's crawl state
++    // (that state ties Link to where the crawl began and kept dragging him, and Steve, back to the entrance).
++    // Switching to Link inside a tunnel starts Zelda's own crawl right there, so Link carries on through it.
++    static bool sWasLinkMode = false;
++    if (sLinkMode && !sWasLinkMode && mc != nullptr && (mc->flags & Bridge::MC_CRAWLING)) {
++        Player_MinecraftSetCrawling(play, player, true);
++        sCrawlFromSteve = true;
++    }
++    sWasLinkMode = sLinkMode;
++    if (sPuppetActive && !sLinkMode && (player->stateFlags2 & PLAYER_STATE2_CRAWLING) && ++sStandFrames > 2) {
++        Player_MinecraftSetCrawling(play, player, false);
++        sStandFrames = 0;
++    }
 +}
 +
 +// After Link's update: if Zelda moved Link far from where we put him (void-out respawn, warp, scripted move),
@@ -2596,9 +2877,54 @@ index 0000000..6cfc010
 +        return;
 +    }
 +    Player* player = GET_PLAYER(gPlayState);
++    // Crawling through a crawlspace: Zelda's own collision pushes Link back out of the entrance (Link only gets in
++    // through Zelda's crawl animation). Steve is the one moving here; keep Link with him instead of yanking Steve
++    // back out of the tunnel.
++    // Same for a second after the crawl ends: standing up at the far end, Link is still half inside the tunnel's
++    // walls and Zelda would shove him out (and Steve would be teleported back with him)
++    static int sCrawlGrace = 0;
++    const Bridge::McState* mc = McPlayer();
++    bool crawling = mc != nullptr && ((mc->flags & Bridge::MC_CRAWLING) || (player->stateFlags2 & PLAYER_STATE2_CRAWLING));
++    if (crawling) {
++        sCrawlGrace = 60;
++    } else if (sCrawlGrace > 0) {
++        sCrawlGrace--;
++    }
++    if (!sLinkMode && mc != nullptr && (crawling || sCrawlGrace > 0)) {
++        player->actor.world.pos = sPuppetPos;
++        player->actor.prevPos = sPuppetPos;
++        player->actor.home.pos = sPuppetPos; // Player_Update starts each frame from home.pos (prevPos = home)
++        return;
++    }
 +    f32 dx = player->actor.world.pos.x - sPuppetPos.x, dy = player->actor.world.pos.y - sPuppetPos.y,
 +        dz = player->actor.world.pos.z - sPuppetPos.z;
++    if ((dx * dx + dz * dz > 60.0f * 60.0f || fabsf(dy) > 120.0f) && !sLinkMode &&
++        !PlayerFrozen(gPlayState, player)) {
++        // Zelda relocated Link in the middle of normal play. Void-outs, warps and grottos reload the area and
++        // scripted moves happen while Zelda has control, so this is Link's own state (e.g. a crawl remembering
++        // where it began) fighting the puppet: Steve is where he really is, keep Link with him.
++        static u32 sLastLog = 0;
++        if (gPlayState->gameplayFrames - sLastLog > 100) {
++            sLastLog = gPlayState->gameplayFrames;
++            SPDLOG_INFO("[OoTCraft] Zelda tried to move Link from ({:.0f},{:.0f},{:.0f}) to ({:.0f},{:.0f},{:.0f}); "
++                        "kept him with Steve", sPuppetPos.x, sPuppetPos.y, sPuppetPos.z, player->actor.world.pos.x,
++                        player->actor.world.pos.y, player->actor.world.pos.z);
++            SPDLOG_INFO("[OoTCraft]   action {} sf1 {:08X} sf2 {:08X} sf3 {:02X} bg {:04X} room {} curRoom {} "
++                        "anim move {:X} home ({:.0f},{:.0f},{:.0f})",
++                        SymbolName((void*)player->actionFunc), player->stateFlags1, player->stateFlags2,
++                        player->stateFlags3, player->actor.bgCheckFlags, player->actor.room,
++                        gPlayState->roomCtx.curRoom.num, player->skelAnime.movementFlags, player->actor.home.pos.x,
++                        player->actor.home.pos.y, player->actor.home.pos.z);
++        }
++        player->actor.world.pos = sPuppetPos;
++        player->actor.prevPos = sPuppetPos;
++        player->actor.home.pos = sPuppetPos; // Player_Update starts each frame from home.pos (prevPos = home)
++        return;
++    }
 +    if (dx * dx + dz * dz > 60.0f * 60.0f || fabsf(dy) > 120.0f) {
++        SPDLOG_INFO("[OoTCraft] Zelda moved Link from ({:.0f},{:.0f},{:.0f}) to ({:.0f},{:.0f},{:.0f}): Steve follows",
++                    sPuppetPos.x, sPuppetPos.y, sPuppetPos.z, player->actor.world.pos.x, player->actor.world.pos.y,
++                    player->actor.world.pos.z);
 +        RequestTeleport(player->actor.world.pos, player->actor.shape.rot.y);
 +    }
 +}
@@ -2646,7 +2972,11 @@ index 0000000..6cfc010
 +}
 +
 +bool FirstPersonActive() {
-+    return sFpActiveThisFrame;
++    // Fresh this frame and no cutscene: otherwise the flag is left over from before Zelda switched cameras, and
++    // Steve's body (hidden in first person) would vanish from cutscenes
++    PlayState* play = gPlayState;
++    return sFpActiveThisFrame && play != nullptr && (play->gameplayFrames - sFpFrame) <= 1 &&
++           play->activeCamera == MAIN_CAM && play->csCtx.state == CS_STATE_IDLE;
 +}
 +
 +uint32_t CurrentLinkFlags(PlayState* play) {
@@ -2678,7 +3008,30 @@ index 0000000..6cfc010
 +}
 +
 +// Steve used the Minecraft version of a Zelda item: Link takes over (third person) and uses it from C-left
++// Your own C-left item, put back once the borrowed one has been used
++bool sHandoffSaved = false;
++u8 sSavedCLeftItem = ITEM_NONE, sSavedCLeftSlot = SLOT_NONE, sHandedItem = ITEM_NONE;
++
++void RestoreCLeft(PlayState* play) {
++    if (!sHandoffSaved) {
++        return;
++    }
++    sHandoffSaved = false;
++    if (gSaveContext.equips.buttonItems[1] != sHandedItem) {
++        return; // you changed C-left yourself in the pause menu: keep that
++    }
++    gSaveContext.equips.buttonItems[1] = sSavedCLeftItem;
++    gSaveContext.equips.cButtonSlots[0] = sSavedCLeftSlot;
++    Interface_LoadItemIcon1(play, 1);
++}
++
 +void RequestItemHandoff(PlayState* play, int slot, int item) {
++    if (!sHandoffSaved) {
++        sHandoffSaved = true;
++        sSavedCLeftItem = gSaveContext.equips.buttonItems[1];
++        sSavedCLeftSlot = gSaveContext.equips.cButtonSlots[0];
++    }
++    sHandedItem = (u8)item;
 +    gSaveContext.equips.buttonItems[1] = item;
 +    gSaveContext.equips.cButtonSlots[0] = slot;
 +    Interface_LoadItemIcon1(play, 1);
@@ -2691,6 +3044,11 @@ index 0000000..6cfc010
 +
 +bool HandoffActive() {
 +    return sLinkMode && McPlayer() != nullptr;
++}
++
++// Link's position corrected to Steve's before anything else reads it this frame (the bridge publishes it next)
++void KeepLinkWithSteve() {
++    OnPlayerUpdate();
 +}
 +
 +} // namespace Minecraft
@@ -2729,6 +3087,101 @@ index 0000000..6cfc010
 +    at->z = eye->z + d.z * 100.0f;
 +    *fov = mc->fov;
 +    sFpActiveThisFrame = true;
++    sFpFrame = play->gameplayFrames;
++    return true;
++}
++
++// Called for every drawn frame (60 per second) while the game runs at 20: the main view's matrix built from
++// Minecraft's camera, read fresh from shared memory (not the 20 Hz copy) and blended between Minecraft's own
++// timestamped samples, so turning and walking are smooth even though the two games draw on separate clocks.
++bool Minecraft_LiveView(MtxF* out, Mtx** key) {
++    using namespace Minecraft;
++    PlayState* play = gPlayState;
++    // Only when this very frame was drawn through Steve's eyes: cutscenes, dialogue cameras, doors and the like
++    // switch Zelda to another camera and stop updating the main one, so a "first person" flag can be stale
++    if (!sFpActiveThisFrame || play == nullptr || !sPuppetActive || play->view.viewingPtr == nullptr ||
++        play->pauseCtx.state != 0 || sFpFrame != play->gameplayFrames || play->activeCamera != MAIN_CAM ||
++        play->csCtx.state != CS_STATE_IDLE || play->transitionTrigger != TRANS_TRIGGER_OFF) {
++        return false;
++    }
++    Bridge::Layout* L = Bridge::Get();
++    if (L == nullptr) {
++        return false;
++    }
++    struct Sample {
++        uint32_t seq;
++        int64_t t; // microseconds
++        f32 x, y, z, yaw, pitch;
++    };
++    static Sample sHist[8];
++    static int sCount = 0;
++    Bridge::McState mc;
++    if (!Bridge::SeqRead(L->mc, mc) || (mc.flags & Bridge::MC_THIRD_PERSON) || mc.sceneId != play->sceneNum) {
++        return false;
++    }
++#ifdef _WIN32
++    static LARGE_INTEGER sFreq{};
++    if (sFreq.QuadPart == 0) {
++        QueryPerformanceFrequency(&sFreq);
++    }
++    LARGE_INTEGER qpc;
++    QueryPerformanceCounter(&qpc);
++    int64_t now = (int64_t)((double)qpc.QuadPart * 1e6 / (double)sFreq.QuadPart);
++#else
++    int64_t now = 0;
++#endif
++    // Minecraft's clock is 32-bit microseconds; widen it next to ours
++    int64_t t = (now & ~0xFFFFFFFFLL) | mc.timeUs;
++    if (t > now + 0x80000000LL) {
++        t -= 0x100000000LL;
++    } else if (t < now - 0x80000000LL) {
++        t += 0x100000000LL;
++    }
++    bool sameClock = mc.timeUs != 0 && llabs(now - t) < 250000;
++    if (!sameClock) {
++        t = now; // not comparable: fall back to when we saw it
++    }
++    f32 eyeY = mc.y + mc.eyeHeight;
++    if (sCount == 0 || sHist[(sCount - 1) & 7].seq != mc.seq) {
++        const Sample& prev = sHist[(sCount - 1) & 7];
++        // A teleport or scene change: don't blend across it
++        if (sCount > 0 && (fabsf(prev.x - mc.x) + fabsf(prev.z - mc.z) > 200.0f || fabsf(prev.y - eyeY) > 200.0f)) {
++            sCount = 0;
++        }
++        sHist[sCount & 7] = { mc.seq, t, mc.x, eyeY, mc.z, (f32)mc.yaw, (f32)mc.pitch };
++        sCount++;
++    }
++    // Show where Minecraft was one of its frames ago, blended between the two samples around that moment
++    int64_t at = now - 17000;
++    Sample a = sHist[(sCount - 1) & 7], b = a;
++    int n = std::min(sCount, 8);
++    for (int i = 1; i < n; i++) {
++        const Sample& older = sHist[(sCount - 1 - i) & 7];
++        const Sample& newer = sHist[(sCount - i) & 7];
++        if (older.t <= at && newer.t >= at) {
++            a = older;
++            b = newer;
++            break;
++        }
++    }
++    f32 f = (b.t > a.t) ? std::clamp((f32)(at - a.t) / (f32)(b.t - a.t), 0.0f, 1.0f) : 1.0f;
++    if (a.seq == b.seq) {
++        a = b = sHist[(sCount - 1) & 7]; // nothing around that moment: newest
++        f = 1.0f;
++    }
++    auto lerpAngle = [](f32 from, f32 to, f32 k) {
++        f32 d = to - from;
++        while (d > 32768.0f) d -= 65536.0f;
++        while (d < -32768.0f) d += 65536.0f;
++        return from + d * k;
++    };
++    f32 ex = a.x + (b.x - a.x) * f, ey = a.y + (b.y - a.y) * f, ez = a.z + (b.z - a.z) * f;
++    s16 yaw = (s16)lroundf(lerpAngle(a.yaw, b.yaw, f));
++    s16 pitch = (s16)lroundf(a.pitch + (b.pitch - a.pitch) * f);
++    f32 cp = Math_CosS(pitch);
++    guLookAtF(out->mf, ex, ey, ez, ex + Math_SinS(yaw) * cp * 100.0f, ey + Math_SinS(pitch) * 100.0f,
++              ez + Math_CosS(yaw) * cp * 100.0f, 0.0f, 1.0f, 0.0f);
++    *key = play->view.viewingPtr;
 +    return true;
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftHud.cpp b/soh/soh/Enhancements/Minecraft/MinecraftHud.cpp
@@ -3130,10 +3583,10 @@ index 0000000..c27c4ff
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftSteve.cpp b/soh/soh/Enhancements/Minecraft/MinecraftSteve.cpp
 new file mode 100644
-index 0000000..a4d8efe
+index 0000000..eb7d086
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftSteve.cpp
-@@ -0,0 +1,388 @@
+@@ -0,0 +1,606 @@
 +#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -3145,6 +3598,13 @@ index 0000000..a4d8efe
 +
 +#include <libultraship/libultraship.h>
 +#include "soh/frame_interpolation.h"
++#include "soh/ResourceManagerHelpers.h"
++#include "objects/object_link_boy/object_link_boy.h"
++#include "objects/object_link_child/object_link_child.h"
++#include <map>
++#include <memory>
++#include <set>
++#include <tuple>
 +
 +extern "C" {
 +#include "z64.h"
@@ -3159,7 +3619,8 @@ index 0000000..a4d8efe
 +// scaled to Minecraft's player height) by overriding each limb's joint offset, while Link's animations still
 +// drive every rotation - so walking, sword swings, climbing, swimming and the ocarina all play on Steve. Each part
 +// is a box textured with the player's real Minecraft skin (shared by the hidden Minecraft client, falling back to
-+// a built-in Steve palette). Link's hands stay so the sword, shield and items he holds remain visible.
++// a built-in Steve palette). Steve's arms end in a block, so Link's own hands are removed - even from the models of
++// a hand gripping the sword, shield or an item, where only the held thing is kept (see StripHand).
 +
 +namespace Minecraft {
 +
@@ -3456,6 +3917,214 @@ index 0000000..a4d8efe
 +    }
 +}
 +
++// ---- Held items without Link's hand
++//
++// Zelda draws "fist holding the Kokiri Sword", "hand holding the slingshot" and so on as one model. Those models
++// reuse the exact vertices of Link's plain hand, so a triangle whose three corners all sit on a plain-hand vertex
++// is part of the hand: it is dropped, and everything else (the item) is kept.
++
++using VtxKey = std::tuple<s16, s16, s16>;
++
++bool IsPtr(uintptr_t p) {
++    return p >= 0x10000000;
++}
++
++Gfx* LoadDl(uintptr_t p) {
++    if (!IsPtr(p)) {
++        return nullptr;
++    }
++    if (ResourceMgr_OTRSigCheck((char*)p)) {
++        return ResourceMgr_LoadGfxByName((const char*)p);
++    }
++    return (Gfx*)p;
++}
++
++const Vtx* VtxFromHash(const Gfx* g) {
++    uintptr_t off = g->words.w1;
++    if (off > 0xFFFFF) {
++        return (const Vtx*)off;
++    }
++    uint64_t hash = ((uint64_t)(uint32_t)g[1].words.w0 << 32) | (uint32_t)g[1].words.w1;
++    char* base = (char*)Ship::Context::GetInstance()->GetResourceManager()->GetResourceRawPointer(hash);
++    return base != nullptr ? (const Vtx*)(base + off) : nullptr;
++}
++
++// Extra words some commands carry after their first one
++int ExtraWords(uint8_t op) {
++    switch (op) {
++        case 0x20: // G_SETTIMG_OTR_HASH
++        case 0x24: // G_VTX_OTR_FILEPATH
++        case 0x31: // G_DL_OTR_HASH
++        case 0x32: // G_VTX_OTR_HASH
++        case 0x33: // G_MARKER
++        case 0x35: // G_BRANCH_Z_OTR
++        case 0x36: // G_MTX_OTR
++        case 0x42: // G_MOVEMEM_OTR
++            return 1;
++        case 0xE4: // G_TEXRECT
++        case 0xE5: // G_TEXRECTFLIP
++            return 2;
++        default:
++            return 0;
++    }
++}
++
++// Every vertex position a display list loads
++void CollectVerts(Gfx* dl, std::set<VtxKey>& out, int depth) {
++    if (dl == nullptr || depth > 6) {
++        return;
++    }
++    for (Gfx* g = dl; g < dl + 20000; g++) {
++        uint8_t op = (uint8_t)(g->words.w0 >> 24);
++        const Vtx* v = nullptr;
++        int n = (int)((g->words.w0 >> 12) & 0xFF);
++        if (op == 0x01 && IsPtr(g->words.w1)) {
++            v = (const Vtx*)g->words.w1;
++        } else if (op == 0x32) {
++            v = VtxFromHash(g);
++        } else if (op == 0xDE) {
++            CollectVerts(LoadDl(g->words.w1), out, depth + 1);
++            if ((g->words.w0 >> 16) & 1) {
++                return; // branch: doesn't come back
++            }
++        } else if (op == 0xDF) {
++            return;
++        }
++        if (v != nullptr) {
++            for (int i = 0; i < n; i++) {
++                out.insert({ v[i].v.ob[0], v[i].v.ob[1], v[i].v.ob[2] });
++            }
++        }
++        g += ExtraWords(op);
++    }
++}
++
++const std::set<VtxKey>& HandVerts(bool left) {
++    static std::set<VtxKey> sSets[2];
++    static bool sBuilt[2] = {};
++    int i = left ? 0 : 1;
++    if (!sBuilt[i]) {
++        sBuilt[i] = true;
++        const char* dls[2][8] = {
++            { gLinkChildLeftFistNearDL, gLinkChildLeftFistFarDL, gLinkChildLeftHandNearDL, gLinkChildLeftHandFarDL,
++              gLinkAdultLeftHandClosedNearDL, gLinkAdultLeftHandClosedFarDL, gLinkAdultLeftHandNearDL,
++              gLinkAdultLeftHandFarDL },
++            { gLinkChildRightHandClosedNearDL, gLinkChildRightHandClosedFarDL, gLinkChildRightHandNearDL,
++              gLinkChildRightHandFarDL, gLinkAdultRightHandClosedNearDL, gLinkAdultRightHandClosedFarDL,
++              gLinkAdultRightHandNearDL, gLinkAdultRightHandFarDL },
++        };
++        for (const char* path : dls[i]) {
++            CollectVerts(ResourceMgr_LoadGfxByName(path), sSets[i], 0);
++        }
++    }
++    return sSets[i];
++}
++
++struct Stripped {
++    std::vector<Gfx> gfx;
++    int removed = 0;
++};
++std::map<std::pair<Gfx*, bool>, std::unique_ptr<Stripped>> sStripped; // never freed: the renderer may still use it
++
++// A copy of `dl` without the triangles that belong to the hand (sub-lists are copied and stripped too)
++Gfx* StripDl(Gfx* dl, bool left, int depth, int& removedTotal) {
++    if (dl == nullptr || depth > 4) {
++        return dl;
++    }
++    auto key = std::make_pair(dl, left);
++    auto it = sStripped.find(key);
++    if (it != sStripped.end()) {
++        removedTotal += it->second->removed;
++        return it->second->gfx.data();
++    }
++    const std::set<VtxKey>& hand = HandVerts(left);
++    auto out = std::make_unique<Stripped>();
++    VtxKey buf[64];
++    bool valid[64] = {};
++    auto isHand = [&](int a, int b, int c) {
++        return a < 64 && b < 64 && c < 64 && valid[a] && valid[b] && valid[c] && hand.count(buf[a]) &&
++               hand.count(buf[b]) && hand.count(buf[c]);
++    };
++    size_t end = 0;
++    for (; end < 20000; end++) {
++        uint8_t op = (uint8_t)(dl[end].words.w0 >> 24);
++        if (op == 0xDF) {
++            break;
++        }
++        end += ExtraWords(op);
++    }
++    out->gfx.assign(dl, dl + end + 1);
++    for (size_t k = 0; k < out->gfx.size(); k++) {
++        Gfx* g = &out->gfx[k];
++        uintptr_t w0 = g->words.w0, w1 = g->words.w1;
++        uint8_t op = (uint8_t)(w0 >> 24);
++        const Vtx* v = nullptr;
++        int n = (int)((w0 >> 12) & 0xFF), v0 = (int)((w0 >> 1) & 0x7F) - n;
++        if (op == 0x01 && IsPtr(w1)) {
++            v = (const Vtx*)w1;
++        } else if (op == 0x32) {
++            v = VtxFromHash(&dl[k]);
++        } else if (op == 0x01 || op == 0x24) {
++            std::fill(valid, valid + 64, false);
++        }
++        if (v != nullptr) {
++            for (int i = 0; i < n; i++) {
++                if (v0 + i >= 0 && v0 + i < 64) {
++                    buf[v0 + i] = { v[i].v.ob[0], v[i].v.ob[1], v[i].v.ob[2] };
++                    valid[v0 + i] = true;
++                }
++            }
++        }
++        if (op == 0x05) { // G_TRI1
++            if (isHand((int)((w0 >> 16) & 0xFF) / 2, (int)((w0 >> 8) & 0xFF) / 2, (int)(w0 & 0xFF) / 2)) {
++                g->words.w0 = 0; // G_NOOP
++                g->words.w1 = 0;
++                out->removed++;
++            }
++        } else if (op == 0x06 || op == 0x07) { // G_TRI2 / G_QUAD
++            bool a = isHand((int)((w0 >> 16) & 0xFF) / 2, (int)((w0 >> 8) & 0xFF) / 2, (int)(w0 & 0xFF) / 2);
++            bool b = isHand((int)((w1 >> 16) & 0xFF) / 2, (int)((w1 >> 8) & 0xFF) / 2, (int)(w1 & 0xFF) / 2);
++            if (a && b) {
++                g->words.w0 = 0;
++                g->words.w1 = 0;
++                out->removed += 2;
++            } else if (a) { // keep the second triangle on its own
++                g->words.w0 = ((uintptr_t)0x05 << 24) | (w1 & 0xFFFFFF);
++                g->words.w1 = 0;
++                out->removed++;
++            } else if (b) {
++                g->words.w0 = ((uintptr_t)0x05 << 24) | (w0 & 0xFFFFFF);
++                g->words.w1 = 0;
++                out->removed++;
++            }
++        } else if (op == 0xDE) { // sub-list: strip it too
++            Gfx* sub = LoadDl(w1);
++            if (sub != nullptr) {
++                g->words.w1 = (uintptr_t)StripDl(sub, left, depth + 1, out->removed);
++            }
++        }
++        k += ExtraWords(op);
++    }
++    removedTotal += out->removed;
++    Gfx* result = out->gfx.data();
++    sStripped[key] = std::move(out);
++    return result;
++}
++
++Gfx* StripHand(Gfx* dl, bool left) {
++    Gfx* loaded = LoadDl((uintptr_t)dl);
++    if (loaded == nullptr) {
++        return dl;
++    }
++    bool fresh = sStripped.find({ loaded, left }) == sStripped.end();
++    int removed = 0;
++    Gfx* out = StripDl(loaded, left, 0, removed);
++    if (fresh) {
++        SPDLOG_INFO("[OoTCraft] held item model: removed {} hand triangles", removed);
++    }
++    return out;
++}
++
 +} // namespace
 +
 +} // namespace Minecraft
@@ -3501,9 +4170,11 @@ index 0000000..a4d8efe
 +    switch (limbIndex) {
 +        case PLAYER_LIMB_L_HAND:
 +        case PLAYER_LIMB_R_HAND:
-+            // Steve's arms end in a block, so Link's bare hands go; hands holding something keep the item
++            // Steve's arms end in a block, so Link's bare hands go; hands holding something keep only the item
 +            if (emptyHand) {
 +                *dList = nullptr;
++            } else if (*dList != nullptr) {
++                *dList = StripHand(*dList, limbIndex == PLAYER_LIMB_L_HAND);
 +            }
 +            return;
 +        case PLAYER_LIMB_SHEATH:
@@ -3524,10 +4195,10 @@ index 0000000..a4d8efe
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
 new file mode 100644
-index 0000000..a09bdc3
+index 0000000..42de591
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
-@@ -0,0 +1,1349 @@
+@@ -0,0 +1,1364 @@
 +#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -3538,6 +4209,7 @@ index 0000000..a09bdc3
 +#include <deque>
 +#include <cmath>
 +#include <cstring>
++#include <filesystem>
 +#include <fstream>
 +#include <map>
 +#include <memory>
@@ -4857,6 +5529,20 @@ index 0000000..a09bdc3
 +    sPatchActorId = ActorDB::Instance->AddEntry(init).entry.id;
 +}
 +
++
++void ForgetDigs() {
++    sConverted.clear();
++    sLoadedFile = -1;
++    std::error_code ec;
++    std::filesystem::path dir = Ship::Context::GetPathRelativeToAppDirectory("Save");
++    for (auto& f : std::filesystem::directory_iterator(dir, ec)) {
++        std::string name = f.path().filename().string();
++        if (name.rfind("oot_dig_file", 0) == 0) {
++            std::filesystem::remove(f.path(), ec);
++        }
++    }
++}
++
 +} // namespace Minecraft
 +
 +extern "C" s32 Minecraft_SealedFromWater(PlayState* play, f32 x, f32 z, f32 ySurface) {
@@ -4893,8 +5579,40 @@ index 3d560bc..e26507f 100644
  void Mouse_UpdateAll() {
      Mouse_UpdatePos();
      Mouse_UpdatePosRel();
+diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
+index 39f04dd..0185d4f 100644
+--- a/soh/soh/OTRGlobals.cpp
++++ b/soh/soh/OTRGlobals.cpp
+@@ -1701,6 +1701,8 @@ extern "C" void Graph_StartFrame() {
+ #endif
+ }
+ 
++bool Minecraft_LiveView(MtxF* out, Mtx** key);
++
+ void RunCommands(Gfx* Commands, const std::vector<std::unordered_map<Mtx*, MtxF>>& mtx_replacements) {
+     auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(OTRGlobals::Instance->context->GetWindow());
+ 
+@@ -1718,7 +1720,17 @@ void RunCommands(Gfx* Commands, const std::vector<std::unordered_map<Mtx*, MtxF>
+         static_cast<UIWidgets::Colors>(CVarGetInteger(CVAR_SETTING("Menu.Theme"), UIWidgets::Colors::LightBlue));
+     ImGui::PushStyleColor(ImGuiCol_TitleBgActive, UIWidgets::ColorValues.at(themeColor));
+     for (const auto& m : mtx_replacements) {
+-        wnd->DrawAndRunGraphicsCommands(Commands, m);
++        // OoTCraft: in Minecraft's first person every drawn frame looks through Minecraft's latest camera, not the
++        // 20 Hz game camera blended between ticks
++        Mtx* liveKey = nullptr;
++        MtxF live;
++        if (Minecraft_LiveView(&live, &liveKey)) {
++            auto withLive = m;
++            withLive[liveKey] = live;
++            wnd->DrawAndRunGraphicsCommands(Commands, withLive);
++        } else {
++            wnd->DrawAndRunGraphicsCommands(Commands, m);
++        }
+         intp->mInterpolationIndex++;
+     }
+     ImGui::PopStyleColor();
 diff --git a/soh/soh/SohGui/SohMenuEnhancements.cpp b/soh/soh/SohGui/SohMenuEnhancements.cpp
-index 4cf7305..a424d2f 100644
+index 4cf7305..aa6bfb2 100644
 --- a/soh/soh/SohGui/SohMenuEnhancements.cpp
 +++ b/soh/soh/SohGui/SohMenuEnhancements.cpp
 @@ -3,6 +3,7 @@
@@ -4905,7 +5623,7 @@ index 4cf7305..a424d2f 100644
  #include <soh/Enhancements/cosmetics/authenticGfxPatches.h>
  #include <soh/Enhancements/TimeDisplay/TimeDisplay.h>
  
-@@ -860,6 +861,21 @@ void SohMenu::AddMenuEnhancements() {
+@@ -860,6 +861,53 @@ void SohMenu::AddMenuEnhancements() {
              "slot to change masks."));
  
      path.column = SECTION_COLUMN_2;
@@ -4924,6 +5642,38 @@ index 4cf7305..a424d2f 100644
 +        .CVar(CVAR_MINECRAFT("AutoLaunch"))
 +        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
 +            "Launch the hidden Minecraft client (the ootmc folder next to Ship of Harkinian) when it isn't running"));
++    AddWidget(path, "Open Minecraft Launcher", WIDGET_BUTTON)
++        .Options(ButtonOptions().Tooltip(
++            "Opens your Minecraft Launcher. Pick the OoTCraft profile and press Play. Your own Minecraft (Java "
++            "Edition, Microsoft account) is required."))
++        .Callback([](WidgetInfo& info) { Minecraft::OpenMinecraftLauncher(); });
++    AddWidget(path, "Join the OoTCraft Discord", WIDGET_BUTTON)
++        .Options(ButtonOptions().Tooltip("discord.gg/w5sxzdPtT7: help, bug reports, builds and sharing your worlds"))
++        .Callback([](WidgetInfo& info) {
++            SDL_OpenURL("https://discord.gg/w5sxzdPtT7");
++        });
++    AddWidget(path, "Developer Client (contributors)", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_MINECRAFT("DevClient"))
++        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
++            "For OoTCraft developers: start Minecraft from the ootmc source folder with Gradle's development client "
++            "instead of your Minecraft Launcher."));
++    static bool sResetArmed = false;
++    AddWidget(path, "Reset Minecraft World", WIDGET_BUTTON)
++        .PreFunc([](WidgetInfo& info) { info.isHidden = sResetArmed; })
++        .Options(ButtonOptions().Tooltip(
++            "Start over with a brand-new Minecraft world (new seed, new inventory and starter kit) and put all of "
++            "Hyrule's dug ground back the way it was. Your Zelda save files are not touched."))
++        .Callback([](WidgetInfo& info) { sResetArmed = true; });
++    AddWidget(path, "Confirm: Delete Minecraft World + All Digs", WIDGET_BUTTON)
++        .PreFunc([](WidgetInfo& info) { info.isHidden = !sResetArmed; })
++        .Options(ButtonOptions().Tooltip("Can't be undone. The area reloads and Minecraft makes a new world."))
++        .Callback([](WidgetInfo& info) {
++            sResetArmed = false;
++            Minecraft::ResetWorld();
++        });
++    AddWidget(path, "Cancel Reset", WIDGET_BUTTON)
++        .PreFunc([](WidgetInfo& info) { info.isHidden = !sResetArmed; })
++        .Callback([](WidgetInfo& info) { sResetArmed = false; });
      AddWidget(path, "Explosives", WIDGET_SEPARATOR_TEXT);
      AddWidget(path, "Remote Bombchu", WIDGET_CVAR_CHECKBOX)
          .CVar(CVAR_ENHANCEMENT("RemoteBombchu"))
@@ -4983,7 +5733,7 @@ index 0d30dcb..c7c009d 100644
          camera->paramFlags &= ~4;
          viewUp = camera->up;
 diff --git a/soh/src/code/z_player_lib.c b/soh/src/code/z_player_lib.c
-index 34750ed..d146293 100644
+index 34750ed..2ce1048 100644
 --- a/soh/src/code/z_player_lib.c
 +++ b/soh/src/code/z_player_lib.c
 @@ -1,4 +1,5 @@
@@ -5006,3 +5756,62 @@ index 34750ed..d146293 100644
      if (GameInteractor_InvisibleLinkActive()) {
          this->actor.shape.shadowDraw = NULL;
          *dList = NULL;
+@@ -1996,7 +2004,8 @@ u8 sPauseModelGroupBySword[] = {
+     PLAYER_MODELGROUP_BGS,              // PLAYER_SWORD_BIGGORON
+ };
+ 
+-s32 Player_OverrideLimbDrawPause(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* arg) {
++static s32 Player_OverrideLimbDrawPauseLink(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot,
++                                                void* arg) {
+     u8* playerSwordAndShield = arg;
+     // SOH: Ensure positive value from playerSwordAndShield[] to avoid OOB array access.
+     //      This can occur in the case where playerSwordAndShield[0] is PLAYER_SWORD_NONE
+@@ -2052,6 +2061,21 @@ s32 Player_OverrideLimbDrawPause(PlayState* play, s32 limbIndex, Gfx** dList, Ve
+     return 0;
+ }
+ 
++// OoTCraft: the equipment screen shows Steve too (same body, Link's held items without his hands)
++s32 Player_OverrideLimbDrawPause(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* arg) {
++    s32 result = Player_OverrideLimbDrawPauseLink(play, limbIndex, dList, pos, rot, arg);
++    if (*dList != NULL && ResourceMgr_OTRSigCheck((char*)*dList)) {
++        *dList = ResourceMgr_LoadGfxByName((const char*)*dList);
++    }
++    Minecraft_OverridePlayerLimb(
++        play, limbIndex, dList, pos, rot, GET_PLAYER(play), true,
++        (limbIndex == PLAYER_LIMB_L_HAND &&
++         (sLeftHandType == PLAYER_MODELTYPE_LH_OPEN || sLeftHandType == PLAYER_MODELTYPE_LH_CLOSED)) ||
++            (limbIndex == PLAYER_LIMB_R_HAND &&
++             (sRightHandType == PLAYER_MODELTYPE_RH_OPEN || sRightHandType == PLAYER_MODELTYPE_RH_CLOSED)));
++    return result;
++}
++
+ #include <overlays/actors/ovl_Demo_Effect/z_demo_effect.h>
+ void DemoEffect_DrawTriforceSpot(Actor* thisx, PlayState* play);
+ 
+diff --git a/soh/src/overlays/actors/ovl_player_actor/z_player.c b/soh/src/overlays/actors/ovl_player_actor/z_player.c
+index 5aa9d94..6e51240 100644
+--- a/soh/src/overlays/actors/ovl_player_actor/z_player.c
++++ b/soh/src/overlays/actors/ovl_player_actor/z_player.c
+@@ -16707,3 +16707,22 @@ void Player_StartTalking(PlayState* play, Actor* actor) {
+         func_80835EA4(play, 0xB);
+     }
+ }
++
++// OoTCraft: put Link into (or take him out of) a crawlspace crawl, so Steve crawling in Minecraft crawls in Zelda
++// too, and switching to Link mid-tunnel carries on crawling.
++void Player_MinecraftSetCrawling(PlayState* play, Player* this, s32 crawl) {
++    if (crawl) {
++        if ((this->stateFlags2 & PLAYER_STATE2_CRAWLING) || LINK_IS_ADULT) {
++            return;
++        }
++        Player_SetupAction(play, this, Player_Action_8084C760, 0);
++        this->stateFlags2 |= PLAYER_STATE2_CRAWLING;
++        LinkAnimation_Change(play, &this->skelAnime, &gPlayerAnim_link_child_tunnel_start, 1.0f,
++                             Animation_GetLastFrame(&gPlayerAnim_link_child_tunnel_start),
++                             Animation_GetLastFrame(&gPlayerAnim_link_child_tunnel_start), ANIMMODE_ONCE, 0.0f);
++        this->skelAnime.movementFlags = 0;
++    } else if (this->stateFlags2 & PLAYER_STATE2_CRAWLING) {
++        func_8083C0E8(this, play);
++        this->stateFlags2 &= ~PLAYER_STATE2_CRAWLING;
++    }
++}

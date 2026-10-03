@@ -69,12 +69,34 @@ public class OotMcClient implements ClientModInitializer {
         ScreenEvents.AFTER_INIT.register((mc, screen, w, h) -> {
             if (screen instanceof TitleScreen && !autoWorldStarted) {
                 autoWorldStarted = true;
+                if (!ownedGame(mc)) {
+                    mc.execute(() -> mc.setScreen(new net.minecraft.client.gui.screens.AlertScreen(
+                        () -> mc.stop(),
+                        net.minecraft.network.chat.Component.literal("OoTCraft needs your own copy of Minecraft"),
+                        net.minecraft.network.chat.Component.literal("Start Minecraft from the official Minecraft "
+                            + "Launcher, signed in with the Microsoft account that owns Minecraft: Java Edition, and "
+                            + "choose the OoTCraft profile. OoTCraft is free, but Minecraft and Ocarina of Time are "
+                            + "not: please own both."),
+                        net.minecraft.network.chat.Component.literal("Quit"), true)));
+                    return;
+                }
                 mc.execute(() -> openWorld(mc, screen));
             }
         });
         ClientTickEvents.END_CLIENT_TICK.register(OotMcClient::tick);
         net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry.register(OotMc.ACTOR_PROXY,
             net.minecraft.client.renderer.entity.NoopRenderer::new);
+    }
+
+    /**
+     * OoTCraft only runs on a Minecraft you own: started from the official launcher with a Microsoft account. The
+     * development environment (contributors running the mod from source) is exempt.
+     */
+    private static boolean ownedGame(Minecraft mc) {
+        if (net.fabricmc.loader.api.FabricLoader.getInstance().isDevelopmentEnvironment()) return true;
+        boolean owned = mc.getUser().getType() == net.minecraft.client.User.Type.MSA;
+        if (!owned) OotMc.LOGGER.warn("[OoTCraft] not started with a Microsoft account: OoTCraft won't run");
+        return owned;
     }
 
     // ---- start-up: jump straight into the OoTCraft world, creating it the first time
@@ -96,6 +118,23 @@ public class OotMcClient implements ClientModInitializer {
             mc.createWorldOpenFlows().createFreshLevel(WORLD_NAME, settings, WorldOptions.defaultWithRandomSeed(),
                 WorldPresets::createNormalWorldDimensions, parent);
         }
+    }
+
+    /**
+     * Zelda's "Reset Minecraft World": leave the world, delete it, and let the title screen hook make a fresh one
+     * (new seed, empty inventory, starter kit again). Hyrule's digs are wiped on Zelda's side at the same time.
+     */
+    private static void resetWorld(Minecraft mc) {
+        OotMc.LOGGER.info("[OoTCraft] resetting the Minecraft world");
+        if (mc.level != null) mc.level.disconnect();
+        mc.disconnect();
+        try (var access = mc.getLevelSource().createAccess(WORLD_NAME)) {
+            access.deleteLevel();
+        } catch (Exception e) {
+            OotMc.LOGGER.error("Couldn't delete the old world", e);
+        }
+        autoWorldStarted = false;
+        mc.setScreen(new TitleScreen()); // AFTER_INIT opens (creates) the world again
     }
 
     /** Auto-accept "experimental settings" / backup prompts while the world is being opened. */
@@ -175,6 +214,23 @@ public class OotMcClient implements ClientModInitializer {
             GLFW.glfwHideWindow(mc.getWindow().getWindow());
         }
 
+        // Render the hand + HUD + menus at exactly the shape of Zelda's view. The hidden window rarely takes the
+        // size it's given (it was stuck at 726x487, so the hotbar and inventory came out squashed and blurry)
+        if (hidden && overlayMode()) {
+            int ww = FrameShare.wantWidth(), wh = FrameShare.wantHeight();
+            var win = mc.getWindow();
+            if (ww >= 320 && wh >= 240 && ww <= FrameShare.MAX_W && wh <= FrameShare.MAX_H
+                && (win.getWidth() != ww || win.getHeight() != wh)) {
+                var acc = (com.ootmc.mixin.client.WindowSizeAccessor) (Object) win;
+                acc.ootmc$setFramebufferWidth(ww);
+                acc.ootmc$setFramebufferHeight(wh);
+                acc.ootmc$setWidth(ww);
+                acc.ootmc$setHeight(wh);
+                mc.resizeDisplay();
+                OotMc.LOGGER.info("[OoTCraft] Minecraft layer now renders at {}x{}", ww, wh);
+            }
+        }
+
         Bridge.LinkState link = bridge.readLink();
         if (link == null) return;
         currentScene = link.scene();
@@ -234,6 +290,8 @@ public class OotMcClient implements ClientModInitializer {
         double mx = Bridge.mcX(scene, x), my = Bridge.mcY(y) + 0.05, mz = Bridge.mcZ(z);
         float myaw = Bridge.mcYaw(yaw);
         if (mc.player != null && mc.level != null && mc.level.dimension() == OotMc.HYRULE) {
+            OotMc.LOGGER.info("[OoTCraft] Zelda teleported Steve from {} to ({}, {}, {})",
+                mc.player.position(), String.format("%.1f", mx), String.format("%.1f", my), String.format("%.1f", mz));
             mc.player.setPos(mx, my, mz);
             mc.player.setYRot(myaw);
             mc.player.setDeltaMovement(Vec3.ZERO);
@@ -364,6 +422,7 @@ public class OotMcClient implements ClientModInitializer {
                     }
                 }
                 case Bridge.EV_CHAR -> ((KeyboardHandlerInvoker) mc.keyboardHandler).ootmc$charTyped(window, ev.x, 0);
+                case Bridge.EV_RESET_WORLD -> mc.tell(() -> resetWorld(mc));
                 case Bridge.EV_MOUSE_BUTTON -> {
                     boolean down = ev.y == 1;
                     if (mc.screen != null) {
@@ -413,6 +472,7 @@ public class OotMcClient implements ClientModInitializer {
         if (player.isShiftKeyDown()) flags |= Bridge.MC_SNEAKING;
         if (player.isDeadOrDying()) flags |= Bridge.MC_DEAD;
         if (!mc.options.getCameraType().isFirstPerson()) flags |= Bridge.MC_THIRD_PERSON;
+        if (player.isVisuallyCrawling()) flags |= Bridge.MC_CRAWLING;
         // Block being mined, so Zelda can draw Minecraft's cracks on it
         int stage = -1;
         net.minecraft.core.BlockPos dpos = net.minecraft.core.BlockPos.ZERO;

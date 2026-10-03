@@ -1,106 +1,131 @@
+<div align="center">
+
+<img src="docs/assets/icon.png" width="96" alt="OoTCraft icon" />
+
 # OoTCraft
 
-**Play The Legend of Zelda: Ocarina of Time as Steve.**
+### Play *The Legend of Zelda: Ocarina of Time* as Steve.
 
-OoTCraft runs Minecraft Java Edition 1.21 and [Ship of Harkinian](https://github.com/HarbourMasters/Shipwright) (the Ocarina of Time PC port) side by side, connected by a shared-memory bridge, the way the SkyCraft mod connects Minecraft and Skyrim.
+**Minecraft is the player. Hyrule is the world.** Mine into Kokiri Forest, build bridges over Hyrule Field, and
+crawl, climb and fight your way through the real game, with Minecraft's hand, hotbar and blocks.
 
-- **Minecraft is the player.** It handles movement, jumping, swimming, the camera, inventory, crafting, health, hunger and blocks. Its window is hidden; its hand and HUD are drawn over Zelda's picture.
-- **Zelda is the world.** Hyrule, its enemies, bosses, NPCs, dialogue, cutscenes, doors, chests and story all run in the real game, untouched.
-- **Hyrule can be dug into.** Mine the ground and that block of the level turns into a real Minecraft block. Under the surface there is a Minecraft world: dirt, stone, deepslate, ores, caves and bedrock. Hyrule itself stays the surface.
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/w5sxzdPtT7)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Free forever](https://img.shields.io/badge/price-free%20forever-brightgreen)](#-free-and-legal)
+[![No copyrighted material](https://img.shields.io/badge/copyrighted%20material-none-blue)](LEGAL.md)
+[![Contributions welcome](https://img.shields.io/badge/contributions-welcome-orange)](CONTRIBUTING.md)
 
-> OoTCraft does not include any Nintendo or Mojang assets. You need your own Ocarina of Time ROM and the Minecraft game files. See **Requirements**.
+**[Website](https://OWNER.github.io/OoTCraft/) · [Discord](https://discord.gg/w5sxzdPtT7) · [Install](#-install) · [Contribute](CONTRIBUTING.md) · [Legal](LEGAL.md)**
 
-## Features
+</div>
+
+---
+
+## ✨ What is it?
+
+OoTCraft runs **Minecraft: Java Edition 1.21** and **[Ship of Harkinian](https://github.com/HarbourMasters/Shipwright)**
+(the community PC port of Ocarina of Time) side by side, connected live through shared memory.
+
+- 🧱 **Minecraft owns the player:** movement, camera, health, hunger, inventory, crafting, every 1.21 block and recipe.
+- 🗡️ **Zelda owns the world:** Hyrule, every enemy, boss, NPC, cutscene, dungeon and the full story run in the real
+  game.
+- 🎥 **Press F5 to become Link:** third person with Zelda's own controls, items and pause menu. Press it again for
+  Steve.
+
+## 🎮 Features
 
 | | |
 |---|---|
-| **Steve in Hyrule** | Link is drawn as Steve with your Minecraft skin. First person uses Minecraft's camera, hand and HUD. |
-| **Blocks** | Place any Minecraft block in Hyrule. Zelda draws it with Minecraft's real textures (any resource pack) and gives it real collision, so Link can stand on it, hookshot to wood, and so on. |
-| **Breakable Hyrule** | Mining Zelda's ground cuts out exactly that block of the level and replaces it with the matching Minecraft block (grass, dirt, sand, stone, planks…). Below the top layers is **real Minecraft 1.21 world generation** (a hidden vanilla overworld with the same seed, aligned under each area): stone and deepslate, every ore, dirt/gravel/granite/diorite/andesite/tuff pockets, caves and aquifers, dungeons with chests, mineshafts, amethyst geodes, trial chambers, ancient cities, and bedrock at the bottom. Break into a cave and it opens up as you explore. Mined blocks drop as items. Digs are saved per save file. Zelda's own dungeons and boss rooms can't be dug, so their puzzles still work. Run `/ootcore` in Minecraft's chat to see what's under you. |
-| **TNT** | Explosions blow craters into Hyrule's ground, lined with Minecraft blocks. Zelda's own bombs do too. |
-| **Combat** | Minecraft weapons hit Zelda enemies as Zelda attacks (sword, arrows, fire, explosions), so enemies with special weak points still work. Zelda damage hurts Steve. |
-| **Zelda items** | Every item Link owns appears in Steve's inventory. The hookshot and longshot are real grapples in Minecraft. Bombs throw real Zelda bombs. Everything else (ocarina, slingshot, boomerang, magic, bottles, hammer, lens, masks, trade items) hands control to Link to use it. |
-| **Talking and story** | Dialogue, cutscenes, the pause menu and the ocarina pass control to Zelda automatically, then back to Minecraft. |
-| **Third person** | F5 switches to Zelda's own third-person camera with Link's full controls; F5 again returns to Steve. |
-| **Climbing** | Zelda's ladders and vines climb like Minecraft ladders. |
-| **Blocking** | NPCs, signs and other Zelda objects block Steve the way they block Link. |
-| **Safety** | Steve can't fall out of the world: below bedrock he's put back, and if that spot is gone too, Zelda's own void-out respawns him at the entrance. |
+| ⛏️ **Dig into Hyrule** | Mine Zelda's ground block by block. Below the surface is a **real Minecraft 1.21 world**: dirt, stone, deepslate, every ore, caves, aquifers, dungeons, mineshafts, geodes, trial chambers and ancient cities, down to bedrock. |
+| 🏗️ **Build anywhere** | Place any Minecraft block in Hyrule with its real textures and 3D model (any resource pack). Link can stand on it, and hookshot to wood. |
+| 🔥 **TNT and fire** | Blow craters into Hyrule, or light fires on Zelda's grass. |
+| ⚔️ **Fight like Steve** | Minecraft weapons hit Zelda's enemies as real Zelda attacks, and Zelda's damage hurts Steve. |
+| 🎒 **Zelda items in your hotbar** | Bombs, hookshot and everything else Link owns show up as Minecraft items. |
+| 🧗 **Climb, crawl, swim** | Vines and ladders climb like Minecraft ladders, and you crawl through Zelda's crawlspaces in Minecraft's crawl pose. |
+| 🧍 **You are Steve** | Link is drawn as Steve with **your own skin**, in the world and on the pause screen. |
+| 💬 **The story still works** | Talk, read signs, open chests and watch cutscenes. Zelda takes over when it needs to, then hands control back. |
 
-## Controls
+## 📥 Install
 
-| Key | Action |
-|---|---|
-| WASD, mouse, Space, Shift, Ctrl | Minecraft movement, look, jump, sneak, sprint |
-| Left click | Attack / mine (Hyrule's ground included) |
-| Right click | Place / use. On a "Speak / Open / Check" prompt, interact with Zelda |
-| R | Zelda's A button (talk, open doors and chests, read signs) |
-| 1–9, mouse wheel | Hotbar |
-| E | Minecraft inventory |
-| Enter | Zelda pause menu (items, map, equipment, save) |
-| F5 | Zelda third person as Link (F5 again to go back) |
-| Esc / F1 | Ship of Harkinian menu |
+**You need:** Windows 10/11 · **your own** Ocarina of Time ROM · **your own** Minecraft: Java Edition (official
+launcher, Microsoft account) · about 15 GB free · an internet connection.
 
-**In dialogue, menus and cutscenes:** Space or left click = A, right click or Backspace = B, Enter = Start, Q = Z, Shift = R.
+1. **[Download OoTCraft](https://github.com/OWNER/OoTCraft/archive/refs/heads/main.zip)** and extract it.
+2. Double-click **`Install-OoTCraft.bat`**. It:
+   - installs the build tools it needs (Git, CMake, Python, Java 21, Visual Studio C++ Build Tools) with `winget`;
+   - downloads the official Ship of Harkinian source and builds it **on your PC** with the OoTCraft patch;
+   - adds an **OoTCraft** profile (Minecraft 1.21 + Fabric) to **your own Minecraft Launcher**;
+   - puts an **OoTCraft** shortcut on your desktop.
+3. Start **OoTCraft**. The first time, choose **your** Ocarina of Time ROM.
+4. Load a save file. Your Minecraft Launcher opens: pick **OoTCraft** and press **Play**. Minecraft hides itself
+   once it connects, and you're Steve in Hyrule.
 
-**As Link (F5):** Ship of Harkinian's keyboard controls apply, the mouse orbits the camera, 1/2/3 = C-left/down/right, F = C-up.
+> To uninstall, run `scripts\uninstall.ps1` (it keeps your worlds unless you add `-RemoveWorlds`).
 
-## Requirements
+## 🕹️ Controls
 
-- Windows 10/11 x64. The bridge uses Windows shared memory.
-- An Ocarina of Time ROM you own. Ship of Harkinian asks for it on first launch, and supports the same ROMs Ship of Harkinian does.
-- Minecraft Java Edition. OoTCraft runs Minecraft 1.21 through Fabric's development launcher; please own the game.
-- [Git](https://git-scm.com/), [CMake](https://cmake.org/) 3.26+, [Python 3](https://www.python.org/), and Visual Studio 2022 or its Build Tools with the "Desktop development with C++" workload.
-- A JDK 21 or newer, for example [Eclipse Temurin](https://adoptium.net/).
+| Key | Minecraft mode (first person) | Link mode (F5, third person) |
+|---|---|---|
+| WASD, Space, Shift, Ctrl | Move, jump, sneak, sprint | Move, A button, R (shield) |
+| Mouse | Look | Orbit the camera |
+| Left click | Attack / mine (Hyrule's ground too) | B (sword) |
+| Right click | Place / use, or talk on a "Speak / Open / Check" prompt | R (shield) |
+| R | Zelda's A button (talk, doors, chests, signs) | |
+| 1 2 3 · F | Hotbar | C-left, C-down, C-right · C-up |
+| Q | | Z (target) |
+| E | Minecraft inventory | |
+| Enter | Zelda pause menu | Zelda pause menu |
+| F5 or G | Switch to Link | Switch back to Steve |
+| Esc | Ship of Harkinian menu (OoTCraft settings, Discord, world reset) | same |
 
-## Setup
+## 🤝 Contribute: everyone's welcome
 
-```powershell
-git clone https://github.com/<you>/OoTCraft.git
-cd OoTCraft
-powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+OoTCraft is **open source (MIT)** and built by its community. Code, testing, bug reports, ideas and docs are all
+welcome.
+
+- Read **[CONTRIBUTING.md](CONTRIBUTING.md)** to set up a development build in a few commands.
+- Look for issues labelled `good first issue`, or bring an idea to the Discord.
+- Please follow the **[Code of Conduct](CODE_OF_CONDUCT.md)**.
+
+## 💬 Community
+
+Join the **[OoTCraft Discord](https://discord.gg/w5sxzdPtT7)**, the social hub for OoTCraft: help with setup, bug
+reports, development chat, screenshots of your builds in Hyrule, and news.
+
+## ⚖️ Free and legal
+
+- **OoTCraft is free. It is not sold, and never will be.**
+- **This repository contains no copyrighted code or material** from Nintendo, Mojang or Microsoft: no ROMs, game
+  code, game assets or Minecraft files, and no prebuilt Ship of Harkinian. Only original OoTCraft code, a patch to
+  open-source Ship of Harkinian, and scripts.
+- **You must own both games.** Ship of Harkinian builds its data from **your own** ROM dump. Minecraft runs through
+  **your own** official launcher and Microsoft account; the mod refuses offline or unofficial accounts.
+- **Unofficial fan project.** Not affiliated with or endorsed by Nintendo, Mojang, Microsoft, Fabric or
+  HarbourMasters. All trademarks belong to their owners.
+- **No warranty:** provided "as is" under the MIT License. Back up your saves.
+
+Full details: **[LEGAL.md](LEGAL.md)**. Rights holders can reach the maintainers through an issue or the Discord.
+
+## 🛠️ How it works
+
+```
+ Ship of Harkinian (visible window)                  Minecraft 1.21 + ootmc (hidden window)
+ ──────────────────────────────────                  ──────────────────────────────────────
+ Hyrule, actors, cutscenes, story        ◄───────►   player physics, camera, inventory, blocks
+ draws the world + Minecraft's HUD layer   shared    collision copy of Hyrule (1/8-block voxels)
+ Link = Steve, placed where Minecraft is   memory    stand-ins for Zelda's enemies
+ Minecraft blocks drawn with real models   %TEMP%    block textures and models exported for Zelda
 ```
 
-`setup.ps1` does the following:
+The Zelda side lives in `soh/soh/Enhancements/Minecraft/` (after the patch is applied). The Minecraft side is the
+`ootmc` Fabric mod.
 
-1. Clones Ship of Harkinian 9.2.3 next to the mod (`OoTCraft\Shipwright`).
-2. Applies `soh\ootcraft-soh-9.2.3.patch`.
-3. Builds Ship of Harkinian and its asset archive.
-4. Pre-builds the Minecraft mod.
+## 🙏 Credits
 
-When it finishes, run `Shipwright\x64\Release\soh.exe`. The first time, choose your ROM so Ship of Harkinian can extract the game's assets. Load a save file and Minecraft starts automatically in the background; the first start downloads Minecraft and takes a few minutes. Turn the mod on or off in **Enhancements → Minecraft Mode**.
-
-Ship of Harkinian finds the `ootmc` folder automatically when it's next to `soh.exe` or up to three folders above it, and finds Java through `JAVA_HOME` or the usual install folders. To point elsewhere, set `gEnhancements.Minecraft.ModDir` / `gEnhancements.Minecraft.JavaHome` in `shipofharkinian.json`.
-
-## How it works
-
-```
- Ship of Harkinian (visible window)                 Minecraft 1.21 + ootmc (hidden window)
- ───────────────────────────────────                ──────────────────────────────────────
- Hyrule, actors, cutscenes, story        ◄──────►   player physics, camera, inventory, blocks
- draws the world + Minecraft's HUD layer  shared    collision copy of Hyrule (1/8-block voxels)
- Link = puppet at Steve's position        memory    invisible stand-ins for Zelda enemies
- block chunks drawn with MC textures      %TEMP%    block palette + textures exported for Zelda
-```
-
-- **`%TEMP%\oot_mc_bridge.bin`** holds the protocol: player, camera and input state, event rings both ways, block sections, moving platforms and nearby actors.
-- **`oot_mc_mesh_<scene>.bin`** is Hyrule's collision, rebuilt whenever ground is dug.
-- **`oot_mc_frame.bin`** carries Minecraft's hand and HUD, read back from the GPU and drawn by Zelda.
-- **`oot_mc_blocktex.bin`** holds the real textures, shapes and collision of every block in use.
-- **`oot_mc_skin.bin`** is your skin.
-
-The Zelda side lives in `soh/soh/Enhancements/Minecraft/` (after the patch is applied); the Minecraft side is the `ootmc` Fabric mod.
-
-## Known limitations
-
-- Windows only.
-- Items that need aiming or careful timing (slingshot, boomerang, hookshot targets in dungeons, ocarina songs) are used as Link in third person, not in Minecraft's first person.
-- Hyrule's ground is cut a block at a time, but pre-rendered rooms (houses, shops, Castle Town Market) are painted backgrounds and can't be dug.
-- Minecraft mobs, dropped items and particles aren't drawn in Zelda's view; drops fly straight into your inventory, and spawners in underground dungeons stay dormant.
-- Inside dungeons and boss rooms, digging is turned off on purpose.
-
-## Credits and license
-
-- OoTCraft code (the `ootmc` mod, the patch's new files and the scripts): MIT, see [LICENSE](LICENSE).
-- [Ship of Harkinian](https://github.com/HarbourMasters/Shipwright) by HarbourMasters, built on the [zeldaret/oot](https://github.com/zeldaret/oot) decompilation. The patch modifies a few of its files; those changes follow Ship of Harkinian's terms.
-- Minecraft is © Mojang Studios / Microsoft. The Legend of Zelda: Ocarina of Time is © Nintendo. This is an unofficial fan project, not affiliated with or endorsed by either; no game assets are included or distributed.
+- **OoTCraft contributors:** everyone who has written code, tested or helped. Thank you!
+- **[Ship of Harkinian](https://github.com/HarbourMasters/Shipwright)** by HarbourMasters, built on the
+  **[zeldaret/oot](https://github.com/zeldaret/oot)** decompilation.
+- **[Fabric](https://fabricmc.net/)**, the mod loader and API.
 - Inspired by SkyCraft (Minecraft × Skyrim).
+
+<div align="center"><sub>Made with ❤️ by fans, for fans. Free forever.</sub></div>

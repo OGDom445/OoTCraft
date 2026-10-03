@@ -2,6 +2,7 @@ package com.ootmc.client;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.ootmc.OotMc;
+import net.minecraft.client.Minecraft;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL15;
 import org.lwjgl.opengl.GL21;
@@ -29,7 +30,7 @@ public final class FrameShare {
     private static MappedByteBuffer buf;
     private static final int[] pbo = new int[2];
     private static int pboW, pboH, pboIndex;
-    private static boolean pboPrimed;
+    private static boolean pboPrimed, lastSync;
     private static int frame;
 
     static synchronized boolean open() {
@@ -84,9 +85,15 @@ public final class FrameShare {
         GL11.glReadPixels(0, 0, w, h, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, 0L);
         GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, prevRead);
 
-        // Publish the previous frame's pixels (one frame of latency, no GPU stall)
-        int other = pboIndex ^ 1;
-        pboIndex = other;
+        // Menus (inventory, crafting...): publish this very frame, so a dragged item keeps up with the cursor (the
+        // layer is small; the wait is short). Otherwise the previous frame's pixels: one frame late, no GPU stall
+        boolean sync = Minecraft.getInstance().screen != null;
+        if (sync != lastSync) {
+            lastSync = sync;
+            pboPrimed = sync; // the other buffer holds an old frame
+        }
+        int other = sync ? pboIndex : pboIndex ^ 1;
+        pboIndex = sync ? pboIndex : other;
         if (pboPrimed) {
             GL15.glBindBuffer(GL21.GL_PIXEL_PACK_BUFFER, pbo[other]);
             ByteBuffer px = GL15.glMapBuffer(GL21.GL_PIXEL_PACK_BUFFER, GL15.GL_READ_ONLY, bytes, null);
