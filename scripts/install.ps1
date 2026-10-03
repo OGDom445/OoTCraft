@@ -39,7 +39,7 @@ function Fail($text) { Write-Host ""; Write-Host "OoTCraft install stopped: $tex
 
 Write-Host ""
 Write-Host "  OoTCraft installer" -ForegroundColor Green
-Write-Host "  Play The Legend of Zelda: Ocarina of Time as Steve. Free and open source." -ForegroundColor DarkGray
+Write-Host "  Play The Legend of Zelda: Ocarina of Time as Steve. Free, and never for sale." -ForegroundColor DarkGray
 Write-Host "  Community: https://discord.gg/w5sxzdPtT7" -ForegroundColor DarkGray
 
 # ---- 0. The rules -------------------------------------------------------------------------------------------------

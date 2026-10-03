@@ -1,13 +1,14 @@
 # Legal notice and disclaimer
 
-**Short version:** OoTCraft is free, open source, unofficial and non-commercial. It contains **no** copyrighted
+**Short version:** OoTCraft is free, source-available, unofficial and non-commercial. It contains **no** copyrighted
 code or assets from Nintendo, Mojang or Microsoft. To use it you must own both The Legend of Zelda: Ocarina of Time
 and Minecraft: Java Edition. It comes with no warranty.
 
 ## 1. What OoTCraft is, and what it is not
 
 - OoTCraft is a fan-made, non-commercial modding project. It is **free**. It is not sold, and nothing in it is behind
-  a paywall. Nobody may charge for it on the project's behalf.
+  a paywall. **Its license forbids selling it or using it commercially**: nobody may charge for OoTCraft, sell copies
+  or modified versions, or put it behind a paywall.
 - OoTCraft is **not affiliated with, endorsed by, sponsored by or approved by** Nintendo Co., Ltd., Mojang Studios, Microsoft Corporation, the Fabric project, or the HarbourMasters team (the authors of
   Ship of Harkinian).
 - "The Legend of Zelda", "Ocarina of Time" and related names are trademarks of Nintendo. "Minecraft" is a trademark of
@@ -16,7 +17,9 @@ and Minecraft: Java Edition. It comes with no warranty.
 
 ## 2. What this repository contains
 
-Only original work by OoTCraft contributors, released under the [MIT License](LICENSE):
+Only original work by OoTCraft contributors, released under the [PolyForm Noncommercial License 1.0.0](LICENSE)
+(free for any noncommercial use; selling or commercial use is not permitted). Versions up to and including v0.1.1
+were published under the MIT License.
 
 - `ootmc/`: the source code of a Minecraft: Java Edition mod (Fabric). It contains no Minecraft code or assets.
   Building it lets Fabric Loom fetch the libraries it compiles against from Mojang's and Fabric's official servers,
@@ -49,7 +52,8 @@ Only original work by OoTCraft contributors, released under the [MIT License](LI
 
 ## 5. No warranty and limitation of liability
 
-OoTCraft is provided **"as is", without warranty of any kind**, express or implied, as stated in the MIT License.
+OoTCraft is provided **"as is", without warranty of any kind**, express or implied (see "No Liability" in the
+license).
 The authors and contributors are not liable for any claim, damages or other liability arising from the software or
 its use. This includes lost save data, corrupted worlds, crashes, hardware issues, account problems, or any
 violation of third-party terms by the user. You use OoTCraft at your own risk and are responsible for complying with
@@ -58,7 +62,7 @@ the laws of your country and the terms of the games you own. Back up your saves.
 ## 6. Contributions
 
 By contributing, you confirm that your contribution is your own original work, or work you have the right to
-submit, and that you license it under the MIT License. Do not contribute code, assets or data copied from Nintendo,
+submit, and that you license it under the PolyForm Noncommercial License 1.0.0, like the rest of OoTCraft. Do not contribute code, assets or data copied from Nintendo,
 Mojang, Microsoft or any other source you don't have rights to.
 
 ## 7. Takedown and contact
@@ -83,7 +87,7 @@ These projects have their own licenses and terms, which apply to them.
 OoTCraft's source code, scripts and documentation were written **entirely with large language models** (AI coding
 assistants), directed, tested and published by the project's human maintainer. The project has been play-tested, but
 the code has not been reviewed line by line by a human expert and may contain bugs or security issues. This doesn't
-change the MIT License or the no-warranty terms above. Review the code yourself before relying on it, and please
+change the license or the no-warranty terms above. Review the code yourself before relying on it, and please
 report problems through issues or the [Discord](https://discord.gg/w5sxzdPtT7). Contributions from humans and AI
 tools alike are welcome, under the same rules: original work only, and no copyrighted material.
 

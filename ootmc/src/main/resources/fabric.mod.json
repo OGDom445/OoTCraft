@@ -5,7 +5,7 @@
 	"name": "OoTCraft",
 	"description": "Play Ocarina of Time as Steve: Minecraft runs hidden alongside Ship of Harkinian and owns the player, inventory and blocks, while Zelda draws Hyrule and runs its enemies, NPCs and story. Hyrule can be dug into, all the way down to bedrock.",
 	"authors": ["OoTCraft contributors"],
-	"license": "MIT",
+	"license": "PolyForm-Noncommercial-1.0.0",
 	"icon": "assets/ootmc/icon.png",
 	"environment": "*",
 	"entrypoints": {

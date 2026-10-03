@@ -10,7 +10,7 @@
 crawl, climb and fight your way through the real game, with Minecraft's hand, hotbar and blocks.
 
 [![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/w5sxzdPtT7)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-green.svg)](LICENSE)
 [![Free forever](https://img.shields.io/badge/price-free%20forever-brightgreen)](#-free-and-legal)
 [![No copyrighted material](https://img.shields.io/badge/copyrighted%20material-none-blue)](LEGAL.md)
 [![Contributions welcome](https://img.shields.io/badge/contributions-welcome-orange)](CONTRIBUTING.md)
@@ -85,7 +85,7 @@ launcher, Microsoft account) · about 15 GB free · an internet connection.
 
 ## 🤝 Contribute: everyone's welcome
 
-OoTCraft is **open source (MIT)** and built by its community. Code, testing, bug reports, ideas and docs are all
+OoTCraft's source is **public and free** ([PolyForm Noncommercial License 1.0.0](LICENSE): use, change and share it, but never sell it), and it's built by its community. Code, testing, bug reports, ideas and docs are all
 welcome.
 
 - Read **[CONTRIBUTING.md](CONTRIBUTING.md)** to set up a development build in a few commands.
@@ -107,7 +107,8 @@ reports, development chat, screenshots of your builds in Hyrule, and news.
   **your own** official launcher and Microsoft account; the mod refuses offline or unofficial accounts.
 - **Unofficial fan project.** Not affiliated with or endorsed by Nintendo, Mojang, Microsoft, Fabric or
   HarbourMasters. All trademarks belong to their owners.
-- **No warranty:** provided "as is" under the MIT License. Back up your saves.
+- **Non-commercial:** licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). Anyone may use, change and share it for free; nobody may sell it or use it commercially.
+- **No warranty:** provided "as is", with no liability (see the license). Back up your saves.
 - **Written with AI:** the code was produced entirely with large language models. It has been play-tested, but
   hasn't been reviewed line by line by a human expert.
 

@@ -7,10 +7,10 @@ docs, ideas, art made for the project, or helping other players on the
 ## Ground rules
 
 1. **No copyrighted material.** Never add Nintendo, Mojang or Microsoft code, assets, ROMs, extracted game data,
-   textures, sounds or links to download them. Your contribution must be your own work, released under the MIT
+   textures, sounds or links to download them. Your contribution must be your own work, released under the PolyForm Noncommercial
    License (see [LEGAL.md](LEGAL.md)).
 2. **Be kind.** Follow the [Code of Conduct](CODE_OF_CONDUCT.md).
-3. **Keep it free.** OoTCraft is non-commercial and always will be.
+3. **Keep it free.** OoTCraft is non-commercial and always will be: its license forbids selling it.
 
 ## Where things live
 
