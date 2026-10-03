@@ -10,12 +10,15 @@
 #         ./install.sh --yes        (you've read and agree to LEGAL.md)
 #         ./install.sh --build-only (just build Ship of Harkinian with OoTCraft; no Minecraft setup)
 #
+# Or without cloning first (it fetches OoTCraft into ~/OoTCraft, or $OOTCRAFT_DIR):
+#         curl -fsSL https://raw.githubusercontent.com/OGDom445/OoTCraft/main/install.sh | bash
+#
 # Linux and macOS support is new and less tested than Windows. Please report problems:
 # https://github.com/OGDom445/OoTCraft/issues  ·  https://discord.gg/w5sxzdPtT7
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || pwd)"
 REPO="OGDom445/OoTCraft"
 SOH_COMMIT="cb71e22"               # Ship of Harkinian 9.2.3 "Ackbar Delta"
 MC_VERSION="1.21"
@@ -35,6 +38,27 @@ title() { printf '\n\033[36m== %s\033[0m\n' "$1"; }
 ok()    { printf '   \033[32m%s\033[0m\n' "$1"; }
 info()  { printf '   %s\n' "$1"; }
 fail()  { printf '\n\033[31mOoTCraft install stopped: %s\033[0m\n' "$1"; exit 1; }
+# Questions come from the keyboard even when the script itself arrives through a pipe (curl ... | bash)
+ask()   { local reply=""; if [[ -r /dev/tty ]]; then read -r -p "$1" reply < /dev/tty || true; fi; printf '%s' "$reply"; }
+
+# ---- Not inside an OoTCraft checkout (run from the web or copied on its own): fetch OoTCraft, then run that copy
+if [[ ! -f "$ROOT/soh/ootcraft-soh-9.2.3.patch" ]]; then
+    DEST="${OOTCRAFT_DIR:-$HOME/OoTCraft}"
+    command -v git >/dev/null 2>&1 || fail "git is needed: install it with your package manager (e.g. sudo apt install git), then run again."
+    PARENT="$(dirname "$DEST")"
+    if ! mkdir -p "$PARENT" 2>/dev/null || [[ ! -w "$PARENT" ]]; then
+        fail "can't write to $PARENT. If that's your home folder, it belongs to another user (a common WSL problem); fix it with: sudo chown -R \"\$USER\": \"\$HOME\" (or choose another folder: OOTCRAFT_DIR=/path/to/OoTCraft)"
+    fi
+    if [[ -d "$DEST/.git" ]]; then
+        printf 'Updating OoTCraft in %s\n' "$DEST"
+        git -C "$DEST" pull --ff-only -q || fail "couldn't update $DEST (local changes?)."
+    else
+        printf 'Downloading OoTCraft into %s\n' "$DEST"
+        git clone -q --branch "${OOTCRAFT_REF:-main}" "https://github.com/$REPO.git" "$DEST" || fail "couldn't download OoTCraft from GitHub."
+    fi
+    exec bash "$DEST/install.sh" "$@"
+fi
+[[ -w "$ROOT" ]] || fail "can't write to $ROOT (the build goes next to this script). Clone OoTCraft into a folder you own, e.g. your home folder."
 
 printf '\n  \033[32mOoTCraft installer\033[0m (Linux / macOS, experimental)\n'
 printf '  Play The Legend of Zelda: Ocarina of Time as Steve. Free, and never for sale.\n'
@@ -48,12 +72,17 @@ info "  - The Legend of Zelda: Ocarina of Time, as a ROM you dumped yourself fro
 info "  - Minecraft: Java Edition, on the Microsoft account you sign in to the Minecraft Launcher with."
 info "Full terms: LEGAL.md. Not affiliated with or endorsed by Nintendo, Mojang, Microsoft or HarbourMasters."
 if [[ $YES -eq 0 ]]; then
-    read -r -p "   Do you own both games and agree to LEGAL.md? (yes/no) " answer
-    [[ "$answer" =~ ^([yY]|[yY][eE][sS])$ ]] || fail "you need to own both games to use OoTCraft."
+    answer="$(ask "   Do you own both games and agree to LEGAL.md? (yes/no) ")"
+    [[ "$answer" =~ ^([yY]|[yY][eE][sS])$ ]] || fail "you need to own both games to use OoTCraft (answer yes, or run with --yes)."
 fi
 
 # ---- 1. Platform and the Minecraft Launcher --------------------------------------------------------------------------
 OS="$(uname -s)"
+if [[ "$OS" == Linux ]] && grep -qi microsoft /proc/version 2>/dev/null; then
+    WSL=1
+    info "Note: this is WSL (Linux inside Windows). To play on this PC, use Install-OoTCraft.bat in Windows instead;"
+    info "WSL is only useful here for building (--build-only)."
+fi
 title "Checking for the Minecraft Launcher"
 case "$OS" in
     Linux)
@@ -73,6 +102,7 @@ case "$OS" in
     *) fail "unsupported system: $OS (OoTCraft supports Windows, Linux and macOS)." ;;
 esac
 if [[ $BUILD_ONLY -eq 0 ]] && [[ "${LAUNCHER_MISSING:-0}" == 1 || ! -d "$MC_DIR" ]]; then
+    [[ "${WSL:-0}" == 1 ]] && fail "no Minecraft Launcher in WSL. On Windows, run Install-OoTCraft.bat instead (or use --build-only to just build here)."
     fail "install the official Minecraft Launcher (https://www.minecraft.net/download), sign in with the account that owns Minecraft: Java Edition, start Minecraft once, then run this installer again."
 fi
 ok "Minecraft folder: $MC_DIR"

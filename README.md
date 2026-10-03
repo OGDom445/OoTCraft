@@ -69,9 +69,15 @@ Edition (official launcher, Microsoft account) · about 15 GB free · an interne
 
 > To uninstall, run `scripts\uninstall.ps1` (it keeps your worlds unless you add `-RemoveWorlds`).
 
-### Linux and macOS (experimental)
+### Linux (experimental)
 
-Linux and macOS support is new and less tested than Windows. Please tell us how it goes on the Discord.
+One command. It downloads OoTCraft into `~/OoTCraft` and runs the installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/OGDom445/OoTCraft/main/install.sh | bash
+```
+
+Or clone it yourself, into a folder you own:
 
 ```bash
 git clone https://github.com/OGDom445/OoTCraft.git
@@ -79,10 +85,24 @@ cd OoTCraft
 ./install.sh
 ```
 
-The script does the same as the Windows installer. It installs Ship of Harkinian's build dependencies with your
-package manager (apt, dnf or pacman on Linux; Homebrew on macOS), builds Ship of Harkinian with OoTCraft, adds the
-**OoTCraft** profile to your Minecraft Launcher (`~/.minecraft`, or the Flatpak launcher), and adds OoTCraft to your
-applications menu on Linux or `~/Applications/OoTCraft.command` on macOS. Downloads are checksum-verified.
+The installer uses your package manager (apt, dnf or pacman) for Ship of Harkinian's build tools, builds it with
+OoTCraft, adds the **OoTCraft** profile to your Minecraft Launcher (`~/.minecraft`, or the Flatpak launcher), and
+adds OoTCraft to your applications menu. Downloads are checksum-verified.
+
+> **WSL users:** on a Windows PC, use `Install-OoTCraft.bat` in Windows instead. If `git clone` says
+> "Permission denied" in WSL, your home folder belongs to root; fix it with `sudo chown -R "$USER": "$HOME"`.
+
+### macOS (experimental)
+
+1. Download **`OoTCraft-<version>-macOS.dmg`** from the [latest release](https://github.com/OGDom445/OoTCraft/releases/latest).
+2. Open it and double-click **Install OoTCraft**. macOS may say it can't check the app; right-click it and choose
+   **Open** (it's a free fan project, so it isn't notarized by Apple).
+3. A Terminal window runs the installer. You'll need [Homebrew](https://brew.sh); the first build takes 15-40 minutes.
+4. Play with **~/Applications/OoTCraft.command**.
+
+You can also use the Linux commands above on a Mac.
+
+Linux and macOS support is new: please tell us how it goes on the [Discord](https://discord.gg/w5sxzdPtT7).
 
 ## 🕹️ Controls
 

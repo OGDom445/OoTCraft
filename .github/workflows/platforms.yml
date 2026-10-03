@@ -1,0 +1,61 @@
+name: Linux and macOS
+
+# Builds Ship of Harkinian with the OoTCraft patch on real Linux and macOS through install.sh --build-only (the same
+# path players use), and builds the macOS .dmg for releases. Heavy, so it runs when the Zelda side, the installer or
+# this workflow changes, for release tags, and on demand.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "soh/**"
+      - "install.sh"
+      - "scripts/macos/**"
+      - ".github/workflows/platforms.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux build (install.sh)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Ship of Harkinian with OoTCraft
+        run: ./install.sh --yes --build-only
+
+  macos:
+    name: macOS build (install.sh)
+    runs-on: macos-14
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Ship of Harkinian with OoTCraft
+        run: ./install.sh --yes --build-only
+
+  dmg:
+    name: macOS installer (.dmg)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the disk image
+        run: |
+          chmod +x scripts/macos/make-dmg.sh
+          scripts/macos/make-dmg.sh "${GITHUB_REF_NAME}" dist
+      - name: No ROMs or game data in the disk image
+        run: |
+          hdiutil attach dist/*.dmg -mountpoint /tmp/ootcraft-dmg -nobrowse
+          du -sh /tmp/ootcraft-dmg
+          find /tmp/ootcraft-dmg -type f \( -iname '*.z64' -o -iname '*.n64' -o -iname '*.v64' -o -iname '*.o2r' -o -iname '*.otr' \) | tee /tmp/found
+          hdiutil detach /tmp/ootcraft-dmg
+          test ! -s /tmp/found
+      - name: Attach to the release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: dist/*.dmg
