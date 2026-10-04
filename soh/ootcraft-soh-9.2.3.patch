@@ -20,10 +20,10 @@ index 70ea296..ae67cb3 100644
  extern "C" ActorDBEntry* ActorDB_Retrieve(const int id) {
 diff --git a/soh/soh/Enhancements/Minecraft/Bridge.h b/soh/soh/Enhancements/Minecraft/Bridge.h
 new file mode 100644
-index 0000000..f42555c
+index 0000000..6d9b35d
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/Bridge.h
-@@ -0,0 +1,323 @@
+@@ -0,0 +1,324 @@
 +﻿#pragma once
 +
 +// OoTCraft shared-memory bridge between Ship of Harkinian and the hidden Minecraft client ("ootmc" Fabric mod).
@@ -118,8 +118,9 @@ index 0000000..f42555c
 +    EV_BLAST = 44,        // x, y, z = explosion centre (Minecraft block), radius = blocks * 10
 +    EV_USE_ZELDA_ITEM = 45, // x = OoT item id: Steve used the Minecraft version of a Zelda item
 +    EV_VOID_OUT = 46,       // Steve fell out of the world: respawn at the entrance, like falling into a pit
-+    EV_CELL_AIR = 47,
-+    EV_RESET_WORLD = 48,    // delete Minecraft's world and start a fresh one (Esc menu option)       // x, y, z = a dug block turned out to be open air underground (cave, mineshaft...)
++    EV_CELL_AIR = 47,       // x, y, z = a dug block turned out to be open air underground (cave, mineshaft...)
++    EV_RESET_WORLD = 48,    // delete Minecraft's world and start a fresh one (Esc menu option)
++    EV_SET_GAMEMODE = 49,   // x = 1 creative, 0 survival (OoTCraft menu option)
 +};
 +
 +enum HitKind : int32_t {
@@ -1496,10 +1497,10 @@ index 0000000..6d58e48
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
 new file mode 100644
-index 0000000..72c27a7
+index 0000000..b119e60
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
-@@ -0,0 +1,866 @@
+@@ -0,0 +1,876 @@
 +﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -2165,6 +2166,16 @@ index 0000000..72c27a7
 +    if (sFramesSinceMcBeat > 60) {
 +        LaunchMinecraft(); // first start, or Minecraft closed/crashed
 +    }
++    // Creative / survival from the OoTCraft menu: sent when it changes and again whenever Minecraft (re)connects
++    static int sSentMode = -1;
++    if (sFramesSinceMcBeat > 60) {
++        sSentMode = -1;
++    }
++    int wantMode = CVarGetInteger(CVAR_MINECRAFT("Creative"), 0) ? 1 : 0;
++    if (wantMode != sSentMode && sFramesSinceMcBeat == 0 && McPlayer() != nullptr) {
++        PushEvent(Bridge::EV_SET_GAMEMODE, wantMode, 0, 0);
++        sSentMode = wantMode;
++    }
 +}
 +
 +void OnPlayerUpdateBridge() {
@@ -2679,10 +2690,10 @@ index 0000000..2e004f1
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
 new file mode 100644
-index 0000000..ffa5611
+index 0000000..910295c
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
-@@ -0,0 +1,967 @@
+@@ -0,0 +1,1040 @@
 +﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -2902,6 +2913,44 @@ index 0000000..ffa5611
 +    }
 +}
 +
++// The character a key press types (Minecraft's text boxes: recipe book and creative search, signs, anvils)
++uint32_t TypedChar(int vk, const bool* down) {
++#ifdef _WIN32
++    BYTE state[256] = {};
++    for (int i = 0; i < 256; i++) {
++        state[i] = down[i] ? 0x80 : 0;
++    }
++    state[VK_SHIFT] = (down[VK_LSHIFT] || down[VK_RSHIFT]) ? 0x80 : 0;
++    state[VK_CAPITAL] = (GetKeyState(VK_CAPITAL) & 1) ? 1 : 0; // caps lock toggle
++    WCHAR out[4] = {};
++    int n = ToUnicodeEx(vk, MapVirtualKeyA(vk, MAPVK_VK_TO_VSC), state, out, 4, 0x4, GetKeyboardLayout(0));
++    return n == 1 && out[0] >= 0x20 ? out[0] : 0;
++#else
++    bool shift = down[VK_LSHIFT] || down[VK_RSHIFT];
++    if (vk >= 'A' && vk <= 'Z') {
++        return shift ? vk : vk + 32;
++    }
++    if (vk >= '0' && vk <= '9') {
++        return shift ? ")!@#$%^&*("[vk - '0'] : vk;
++    }
++    switch (vk) {
++        case VK_SPACE: return ' ';
++        case VK_OEM_MINUS: return shift ? '_' : '-';
++        case VK_OEM_PLUS: return shift ? '+' : '=';
++        case VK_OEM_COMMA: return shift ? '<' : ',';
++        case VK_OEM_PERIOD: return shift ? '>' : '.';
++        case VK_OEM_2: return shift ? '?' : '/';
++        case VK_OEM_1: return shift ? ':' : ';';
++        case VK_OEM_7: return shift ? '"' : '\'';
++        case VK_OEM_3: return shift ? '~' : '`';
++        case VK_OEM_4: return shift ? '{' : '[';
++        case VK_OEM_6: return shift ? '}' : ']';
++        case VK_OEM_5: return shift ? '|' : '\\';
++        default: return 0;
++    }
++#endif
++}
++
 +int CurrentMods(const bool* vk) {
 +    int mods = 0;
 +    if (vk[VK_LSHIFT] || vk[VK_RSHIFT]) mods |= 1;
@@ -3079,7 +3128,33 @@ index 0000000..ffa5611
 +    sOwner = owner;
 +
 +    HWND hwnd = GameHwnd();
-+    bool focus = hwnd != nullptr && !MenuOpen();
++    // Esc in a Minecraft screen (crafting table, inventory, chest) belongs to Minecraft: Ship of Harkinian's menu
++    // also opens on Esc, and while it's open no input reached Minecraft, so the screen could never be closed
++    static bool sMenuWasOpen = false;
++    static bool sSwallowEsc = false;
++    if (sSwallowEsc && !(GetAsyncKeyState(VK_ESCAPE) & 0x8000)) {
++        sSwallowEsc = false; // released
++    }
++    bool menuOpen = MenuOpen();
++    if (menuOpen && !sMenuWasOpen && mc != nullptr && (mc->flags & Bridge::MC_SCREEN_OPEN) && hwnd != nullptr &&
++        (GetAsyncKeyState(VK_ESCAPE) & 0x8000)) {
++        auto gui = Window()->GetGui();
++        if (gui != nullptr && gui->GetMenu() != nullptr) {
++            gui->GetMenu()->Hide();
++        }
++        if (gui != nullptr && gui->GetMenuBar() != nullptr) {
++            gui->GetMenuBar()->Hide();
++        }
++        if (!sPrevVk[VK_ESCAPE]) {
++            // The menu opened before this press reached Minecraft: send it now, once
++            PushEvent(Bridge::EV_KEY, 256, 1, 0);
++            PushEvent(Bridge::EV_KEY, 256, 0, 0);
++            sSwallowEsc = true; // don't forward it again when input resumes (that opened Minecraft's game menu)
++        }
++        menuOpen = MenuOpen();
++    }
++    sMenuWasOpen = menuOpen;
++    bool focus = hwnd != nullptr && !menuOpen;
 +    bool vk[256] = {};
 +    if (focus) {
 +        for (int i = 1; i < 256; i++) {
@@ -3138,7 +3213,6 @@ index 0000000..ffa5611
 +
 +    s32 mdx = 0, mdy = 0;
 +    Mouse_GetDelta(&mdx, &mdy);
-+    Ship::CoordsF wheel = focus ? Window()->GetMouseWheel() : Ship::CoordsF{ 0, 0 };
 +
 +    if (owner == InputOwner::Minecraft) {
 +        play->manualCamera = false; // the mouse is Minecraft's: it mustn't swing Zelda's hidden free-look camera
@@ -3151,7 +3225,7 @@ index 0000000..ffa5611
 +                // person; R is Zelda's A button (talk, open, check)
 +                continue;
 +            }
-+            if (vk[i] == sPrevVk[i]) {
++            if (vk[i] == sPrevVk[i] || (i == VK_ESCAPE && sSwallowEsc)) {
 +                continue;
 +            }
 +            int key = VkToGlfw(i);
@@ -3160,6 +3234,11 @@ index 0000000..ffa5611
 +            }
 +            if (key != 0) {
 +                PushEvent(Bridge::EV_KEY, key, vk[i] ? 1 : 0, mods);
++            }
++            if (vk[i] && mcScreen && !(mods & 2)) { // typed text for Minecraft's text boxes (not Ctrl shortcuts)
++                if (uint32_t ch = TypedChar(i, vk)) {
++                    PushEvent(Bridge::EV_CHAR, (int32_t)ch, 0, 0);
++                }
 +            }
 +        }
 +        if (lmb != sPrevLmb) PushEvent(Bridge::EV_MOUSE_BUTTON, 0, lmb ? 1 : 0, mods);
@@ -3174,7 +3253,6 @@ index 0000000..ffa5611
 +        if (mmb != sPrevMmb) PushEvent(Bridge::EV_MOUSE_BUTTON, 2, mmb ? 1 : 0, mods);
 +        sMouseDxTotal += mdx;
 +        sMouseDyTotal += mdy;
-+        sWheelTotal += (int32_t)wheel.y;
 +
 +        // Zelda sees no controller input while Minecraft drives, except Enter -> Start (pause menu) and
 +        // R / right click -> A (talk, open doors and chests, check signs)
@@ -3421,6 +3499,12 @@ index 0000000..ffa5611
 +        sMouseDxTotal += d.x;
 +        sMouseDyTotal += d.y;
 +    }
++    // The wheel only remembers its latest notch: read it every frame, not 20 times a second, or notches are lost
++    // (hotbar slots, scrolling the creative inventory and recipe book)
++    Ship::CoordsF wheel = Window()->GetMouseWheel();
++    if (GameHwnd() != nullptr && !MenuOpen()) {
++        sWheelTotal += (int32_t)wheel.y;
++    }
 +    PublishInput();
 +}
 +
@@ -3518,7 +3602,7 @@ index 0000000..ffa5611
 +    return true;
 +}
 +
-+// Called for every drawn frame (60 per second) while the game runs at 20: the main view's matrix built from
++// Called for every drawn frame (up to the monitor's refresh rate) while the game runs at 20: the main view's matrix built from
 +// Minecraft's camera, read fresh from shared memory (not the 20 Hz copy) and blended between Minecraft's own
 +// timestamped samples, so turning and walking are smooth even though the two games draw on separate clocks.
 +bool Minecraft_LiveView(MtxF* out, Mtx** key) {
@@ -3582,7 +3666,7 @@ index 0000000..ffa5611
 +        sCount++;
 +    }
 +    // Show where Minecraft was one of its frames ago, blended between the two samples around that moment
-+    int64_t at = now - 17000;
++    int64_t at = now - 9000; // Minecraft draws at 120 FPS
 +    Sample a = sHist[(sCount - 1) & 7], b = a;
 +    int n = std::min(sCount, 8);
 +    for (int i = 1; i < n; i++) {
@@ -3776,10 +3860,10 @@ index 0000000..1165243
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp b/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp
 new file mode 100644
-index 0000000..7de40d4
+index 0000000..668fc99
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,289 @@
 +﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -3988,10 +4072,12 @@ index 0000000..7de40d4
 +        }
 +        ImGuiWindow* game = ImGui::FindWindowByName("Main Game");
 +        if (game != nullptr && game->Size.x > 0 && game->Size.y > 0) {
-+            // Same aspect as the game view, capped at 1280x720 to keep the per-frame copy cheap
-+            float scale = std::min(1.0f, std::min(1280.0f / game->Size.x, 720.0f / game->Size.y));
-+            Field(16) = (uint32_t)(game->Size.x * scale);
-+            Field(20) = (uint32_t)(game->Size.y * scale);
++            // An exact fraction of the game view (1/1, 1/2, 1/3...) no bigger than 1920x1080: scaled back up by a whole
++            // number with sharp pixels, Minecraft's hotbar, text and items stay crisp and even (a 2.98x stretch made
++            // them jagged and blurry)
++            int divisor = std::max(1, (int)std::ceil(std::max(game->Size.x / (float)kMaxW, game->Size.y / (float)kMaxH)));
++            Field(16) = (uint32_t)(game->Size.x / divisor);
++            Field(20) = (uint32_t)(game->Size.y / divisor);
 +        }
 +        Field(28) = want ? 1u : 0u; // Minecraft skips the readback while nothing is shown
 +        if (!want || Field(24) == 0 || game == nullptr) {
@@ -4006,7 +4092,7 @@ index 0000000..7de40d4
 +                sTextureId = api->NewTexture();
 +            }
 +            api->SelectTexture(0, sTextureId);
-+            api->SetSamplerParameters(0, true, G_TX_CLAMP, G_TX_CLAMP);
++            api->SetSamplerParameters(0, false, G_TX_CLAMP, G_TX_CLAMP); // sharp pixels at a whole-number scale
 +            api->UploadTexture(sPixels.data(), sTexW, sTexH);
 +            sTextureValid = true;
 +        }
@@ -4039,11 +4125,11 @@ index 0000000..7de40d4
 +                gui->AddGuiWindow(sOverlay);
 +                // Mouse look at Zelda's native 20 FPS feels laggy: draw interpolated frames at the monitor's
 +                // refresh rate (applied once; it can be changed back in Settings > Graphics)
-+                // A steady 60 FPS: the same rate as Minecraft's layer, and it divides evenly into 120/144/240 Hz
-+                if (CVarGetInteger(CVAR_MINECRAFT("PerfDefaultsApplied"), 0) < 3) {
-+                    CVarSetInteger(CVAR_SETTING("MatchRefreshRate"), 0);
-+                    CVarSetInteger(CVAR_SETTING("InterpolationFPS"), 60);
-+                    CVarSetInteger(CVAR_MINECRAFT("PerfDefaultsApplied"), 3);
++                // Every frame the monitor can show: looking around is drawn fresh from the mouse each frame, so a
++                // 60 FPS cap made turning feel laggy on 120/144/240 Hz screens
++                if (CVarGetInteger(CVAR_MINECRAFT("PerfDefaultsApplied"), 0) < 4) {
++                    CVarSetInteger(CVAR_SETTING("MatchRefreshRate"), 1);
++                    CVarSetInteger(CVAR_MINECRAFT("PerfDefaultsApplied"), 4);
 +                    gui->SaveConsoleVariablesNextFrame();
 +                }
 +                // F5 third person is Zelda's camera: let the mouse orbit it
@@ -6168,10 +6254,10 @@ index 4cf7305..b1fec17 100644
  
 diff --git a/soh/soh/SohGui/SohMenuOoTCraft.cpp b/soh/soh/SohGui/SohMenuOoTCraft.cpp
 new file mode 100644
-index 0000000..52196e5
+index 0000000..c96aa99
 --- /dev/null
 +++ b/soh/soh/SohGui/SohMenuOoTCraft.cpp
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,92 @@
 +#include "SohMenu.h"
 +#include "SohGui.hpp"
 +#include "soh/OTRGlobals.h"
@@ -6198,6 +6284,11 @@ index 0000000..52196e5
 +    AddWidget(path, "Steve Model", WIDGET_CVAR_CHECKBOX)
 +        .CVar(CVAR_MINECRAFT_STEVE)
 +        .Options(CheckboxOptions().DefaultValue(true).Tooltip("Draw Link as Steve, with your Minecraft skin"));
++    AddWidget(path, "Creative Mode", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_MINECRAFT("Creative"))
++        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
++            "Minecraft creative mode: fly (double-tap Space), every block in the inventory, no damage or hunger. "
++            "Untick for survival."));
 +    AddWidget(path, "Controls", WIDGET_SEPARATOR_TEXT);
 +    AddWidget(path,
 +              "Minecraft mode: WASD / mouse / Space move, look and jump. Left click mines and attacks (Hyrule's ground "

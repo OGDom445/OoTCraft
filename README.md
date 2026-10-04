@@ -48,6 +48,7 @@ OoTCraft runs **Minecraft: Java Edition 1.21** and **[Ship of Harkinian](https:/
 | 🎒 **Zelda items in your hotbar** | Bombs, hookshot and everything else Link owns show up as Minecraft items. |
 | 🧗 **Climb, crawl, swim** | Vines and ladders climb like Minecraft ladders, and you crawl through Zelda's crawlspaces in Minecraft's crawl pose. |
 | 🧍 **You are Steve** | Link is drawn as Steve with **your own skin**, in the world and on the pause screen. |
+| 🎨 **Survival or creative** | Survival by default (Minecraft health, hunger and crafting). Tick **OoTCraft → Play → Creative Mode** to fly and get every block. |
 | 💬 **The story still works** | Talk, read signs, open chests and watch cutscenes. Zelda takes over when it needs to, then hands control back. |
 
 ## 📥 Install
@@ -118,7 +119,8 @@ Linux and macOS support is new: please tell us how it goes on the [Discord](http
 | E | Minecraft inventory | |
 | Enter | Zelda pause menu | Zelda pause menu |
 | F5 or G | Switch to Link | Switch back to Steve |
-| Esc | Ship of Harkinian menu: the **OoTCraft** tab has the settings, world reset and Discord | same |
+| Esc | Closes a Minecraft menu (inventory, crafting table, chest). Otherwise the Ship of Harkinian menu: the **OoTCraft** tab has the settings, creative mode, world reset and Discord | same |
+| Mouse in menus | Click, Shift-click, drag to spread a stack, scroll wheel, type in search boxes | |
 
 ## 🤝 Contribute: everyone's welcome
 

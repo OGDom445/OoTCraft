@@ -54,6 +54,16 @@ public class OotMc implements ModInitializer {
 
     /** Zelda requests the client thread received that must run on the server thread. */
     public static final ConcurrentLinkedQueue<Bridge.Event> SERVER_EVENTS = new ConcurrentLinkedQueue<>();
+    /** Creative Mode from Zelda's OoTCraft menu: 1 creative, 0 survival, -1 not heard yet (use what the player had). */
+    private static volatile int wantedCreative = -1;
+
+    /** Survival unless creative was picked in Zelda's OoTCraft menu (remembered on the player between sessions). */
+    private static void applyGameMode(ServerPlayer p) {
+        if (wantedCreative == 1) p.addTag("ootmc_creative");
+        else if (wantedCreative == 0) p.removeTag("ootmc_creative");
+        GameType mode = p.getTags().contains("ootmc_creative") ? GameType.CREATIVE : GameType.SURVIVAL;
+        if (p.gameMode.getGameModeForPlayer() != mode) p.setGameMode(mode);
+    }
 
     private final Set<Long> sentSections = new HashSet<>();
     private final Map<Long, Integer> sectionSlots = new LinkedHashMap<>(16, 0.75f, true);
@@ -139,7 +149,7 @@ public class OotMc implements ModInitializer {
         player.server.getGameRules().getRule(net.minecraft.world.level.GameRules.RULE_DAYLIGHT).set(false, player.server);
         hyrule.setDayTime(6000);
         // Survival: Minecraft health is the real one (Zelda's hearts mirror it)
-        player.setGameMode(GameType.SURVIVAL);
+        applyGameMode(player);
         // Every 1.21 recipe in the recipe book from the start (crafting itself never needed unlocking)
         player.awardRecipes(player.server.getRecipeManager().getRecipes());
         // A starter hotbar the first time (the inventory screen isn't drawn into Zelda yet)
@@ -259,6 +269,13 @@ public class OotMc implements ModInitializer {
                 }
                 case Bridge.EV_PLAYER_HEAL -> {
                     for (ServerPlayer p : level.players()) p.heal(ev.x / 8.0f);
+                }
+                case Bridge.EV_SET_GAMEMODE -> {
+                    // OoTCraft menu: creative or survival, remembered on the player for the next session
+                    // (every player on the server: right after joining, the player may not be in Hyrule yet)
+                    wantedCreative = ev.x == 1 ? 1 : 0;
+                    for (ServerPlayer p : level.getServer().getPlayerList().getPlayers()) applyGameMode(p);
+                    LOGGER.info("[OoTCraft] game mode from Zelda's menu: {}", ev.x == 1 ? "creative" : "survival");
                 }
                 default -> {}
             }

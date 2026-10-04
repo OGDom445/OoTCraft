@@ -62,6 +62,14 @@ public class OotMcClient implements ClientModInitializer {
     /** Keys / buttons Zelda says are held; re-asserted every frame (the hidden window loses Minecraft's own key state). */
     private static final java.util.Set<Integer> heldKeys = new java.util.HashSet<>();
     private static final java.util.Set<Integer> heldButtons = new java.util.HashSet<>();
+    /** Mouse buttons held down inside a menu, and where the cursor was last (for dragging stacks across slots). */
+    private static final java.util.Set<Integer> screenButtons = new java.util.HashSet<>();
+    private static double lastGx = -1, lastGy = -1;
+
+    /** Whether Zelda says this key is held (the hidden window's own key state is always "up"). */
+    public static boolean keyHeld(int key) {
+        return heldKeys.contains(key);
+    }
 
     @Override
     public void onInitializeClient() {
@@ -103,7 +111,7 @@ public class OotMcClient implements ClientModInitializer {
     private static void openWorld(Minecraft mc, Screen parent) {
         mc.options.pauseOnLostFocus = false;
         mc.options.getSoundSourceOptionInstance(SoundSource.MUSIC).set(0.0);
-        mc.options.framerateLimit().set(60);
+        mc.options.framerateLimit().set(120); // hand and menus keep up with Zelda's high-refresh frames
         // Minecraft only draws the HUD and hand here; Zelda draws the world
         mc.options.renderDistance().set(2);
         mc.options.simulationDistance().set(5);
@@ -112,7 +120,7 @@ public class OotMcClient implements ClientModInitializer {
         if (mc.getLevelSource().levelExists(WORLD_NAME)) {
             mc.createWorldOpenFlows().openWorld(WORLD_NAME, () -> mc.setScreen(parent));
         } else {
-            LevelSettings settings = new LevelSettings(WORLD_NAME, GameType.CREATIVE, false, Difficulty.NORMAL, true,
+            LevelSettings settings = new LevelSettings(WORLD_NAME, GameType.SURVIVAL, false, Difficulty.NORMAL, true,
                 new GameRules(), WorldDataConfiguration.DEFAULT);
             mc.createWorldOpenFlows().createFreshLevel(WORLD_NAME, settings, WorldOptions.defaultWithRandomSeed(),
                 WorldPresets::createNormalWorldDimensions, parent);
@@ -396,6 +404,10 @@ public class OotMcClient implements ClientModInitializer {
             boolean owns = (in.flags() & 1) != 0;
             gx = in.cursorX() * mc.getWindow().getGuiScaledWidth();
             gy = in.cursorY() * mc.getWindow().getGuiScaledHeight();
+            // Menus are drawn at the hidden window's own cursor, which never moves: put it where Zelda's cursor is
+            var mouse = (com.ootmc.mixin.client.MouseHandlerAccessor) mc.mouseHandler;
+            mouse.ootmc$setXpos(in.cursorX() * mc.getWindow().getScreenWidth());
+            mouse.ootmc$setYpos(in.cursorY() * mc.getWindow().getScreenHeight());
             if (owns && mc.screen == null && player != null && !frozen) {
                 double s = mc.options.sensitivity().get() * 0.6 + 0.2;
                 double f = s * s * s * 8.0;
@@ -404,7 +416,17 @@ public class OotMcClient implements ClientModInitializer {
             }
             if (mc.screen != null) {
                 mc.screen.mouseMoved(gx, gy);
+                // Holding a button while moving drags: spreads a stack over slots, moves sliders and scroll bars
+                if (lastGx >= 0 && (gx != lastGx || gy != lastGy)) {
+                    for (int b : screenButtons) mc.screen.mouseDragged(gx, gy, b, gx - lastGx, gy - lastGy);
+                }
+                // The wheel scrolls lists: creative tabs, recipe book, world and server lists
+                if (dw != 0) mc.screen.mouseScrolled(gx, gy, 0, dw);
+            } else {
+                screenButtons.clear();
             }
+            lastGx = gx;
+            lastGy = gy;
         }
 
         while (bridge.popEvent(ev)) {
@@ -425,8 +447,13 @@ public class OotMcClient implements ClientModInitializer {
                 case Bridge.EV_MOUSE_BUTTON -> {
                     boolean down = ev.y == 1;
                     if (mc.screen != null) {
-                        if (down) mc.screen.mouseClicked(gx, gy, ev.x);
-                        else mc.screen.mouseReleased(gx, gy, ev.x);
+                        if (down) {
+                            screenButtons.add(ev.x);
+                            mc.screen.mouseClicked(gx, gy, ev.x);
+                        } else {
+                            screenButtons.remove(ev.x);
+                            mc.screen.mouseReleased(gx, gy, ev.x);
+                        }
                     } else {
                         InputConstants.Key key = InputConstants.Type.MOUSE.getOrCreate(ev.x);
                         KeyMapping.set(key, down);

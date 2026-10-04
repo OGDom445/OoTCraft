@@ -30,6 +30,9 @@ were published under the MIT License.
   files are shown only as diff context and are applied to the user's own checkout of the official repository.
   OoTCraft does not redistribute Ship of Harkinian.
 - `scripts/`, `Install-OoTCraft.bat` and `install.sh`: installer and build scripts (Windows, Linux, macOS).
+- The macOS disk image (`OoTCraft-<version>-macOS.dmg`, attached to releases): an "Install OoTCraft" app that
+  runs `install.sh`, plus this repository's source, README, LEGAL.md and LICENSE. It is checked automatically to
+  contain no ROMs or game data.
 - Documentation.
 
 ## 3. What this repository does **not** contain, and never will

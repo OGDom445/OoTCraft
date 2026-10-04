@@ -23,8 +23,10 @@ docs, ideas, art made for the project, or helping other players on the
 
 ## Setting up a development build
 
-Requirements: Windows 10/11, Git, CMake 3.26+, Python 3, a JDK 25+ (Fabric Loom needs it; the mod itself targets Java 21), and Visual Studio 2022 (or Build Tools) with the
-C++ workload. You also need your own Ocarina of Time ROM and Minecraft: Java Edition.
+You need your own Ocarina of Time ROM and Minecraft: Java Edition, plus Git, CMake 3.26+, Python 3 and a JDK 25+
+(Fabric Loom needs it; the mod itself targets Java 21).
+
+**Windows** (also needs Visual Studio 2022 or its Build Tools with the C++ workload):
 
 ```powershell
 git clone https://github.com/OGDom445/OoTCraft.git
@@ -32,12 +34,25 @@ cd OoTCraft
 powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 ```
 
-This clones Ship of Harkinian into `Shipwright/` (ignored by git), applies the patch, builds it and builds the mod.
-Run `Shipwright\x64\Release\soh.exe` and tick **OoTCraft → Play → Developer Client** in the Esc menu, so Minecraft
-starts from `ootmc/` through Gradle's development client and picks up your changes.
+**Linux / macOS** (installs Ship of Harkinian's build dependencies with apt, dnf, pacman or Homebrew):
 
-- Rebuild the Zelda side: `cmake --build Shipwright/build/x64 --config Release --target soh`
-- Rebuild the mod: `cd ootmc` then `gradlew build`
+```bash
+git clone https://github.com/OGDom445/OoTCraft.git
+cd OoTCraft
+./install.sh --build-only
+```
+
+Both clone Ship of Harkinian into `Shipwright/` (ignored by git), apply the patch and build it. Run the game
+(`Shipwright\x64\Release\soh.exe` on Windows, `Shipwright/build-cmake/soh/soh.elf` on Linux,
+`Shipwright/build-cmake/soh/soh-macos` on macOS) and tick **OoTCraft → Play → Developer Client** in the Esc menu, so
+Minecraft starts from `ootmc/` through Gradle's development client and picks up your changes.
+
+- Rebuild the Zelda side: `cmake --build Shipwright/build/x64 --config Release --target soh` (Windows) or
+  `cmake --build Shipwright/build-cmake` (Linux/macOS)
+- Rebuild the mod: `cd ootmc` then `./gradlew build` (`gradlew build` on Windows)
+
+The Zelda side has a little platform-specific code (shared memory, keyboard/mouse, launching Minecraft); keep both
+the `_WIN32` and the POSIX branches working. CI builds the Zelda side on Linux and macOS for every change to it.
 
 ## Sending Zelda-side changes
 
@@ -57,7 +72,8 @@ Then commit the updated patch along with any mod changes.
 - Keep each pull request focused on one fix or feature. Describe what you changed and how you tested it in-game.
 - Match the surrounding style: C++ uses the Ship of Harkinian clang-format style; Java uses 4-space indents.
 - Comments explain *why* something is done, not what each line does.
-- CI builds the mod, checks the patch still applies to a clean Ship of Harkinian 9.2.3, and runs
+- CI builds the mod, builds Ship of Harkinian + OoTCraft on Linux and macOS when the Zelda side or the installer
+  changes, checks the patch still applies to a clean Ship of Harkinian 9.2.3, and runs
   `scripts/check_no_game_data.py`, which rejects ROMs, extracted game archives and oversized files.
 
 ## Reporting bugs
