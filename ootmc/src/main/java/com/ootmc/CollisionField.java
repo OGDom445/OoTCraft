@@ -70,6 +70,69 @@ public final class CollisionField {
         return mesh;
     }
 
+    // ---- the map's footprint: block columns Hyrule's level covers (or that were dug), with a margin
+    private static Mesh footprintOf;
+    private static java.util.BitSet footprint;
+    private static int fpX0, fpZ0, fpW, fpH;
+    private static final int FP_MARGIN = 3;
+
+    /** Does Hyrule's map cover this block column? Outside it, Minecraft's world goes on (see Frontier). */
+    public static synchronized boolean onMap(int x, int z) {
+        Mesh m = mesh;
+        if (m == null) return true;
+        if (footprintOf != m) buildFootprint(m);
+        if (x < fpX0 || z < fpZ0 || x >= fpX0 + fpW || z >= fpZ0 + fpH) return false;
+        return footprint.get((z - fpZ0) * fpW + (x - fpX0));
+    }
+
+    private static void buildFootprint(Mesh m) {
+        int count = m.tris.length / 9;
+        float minX = Float.MAX_VALUE, minZ = Float.MAX_VALUE, maxX = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
+        for (int i = 0; i < count * 3; i++) {
+            minX = Math.min(minX, m.tris[i * 3]);
+            maxX = Math.max(maxX, m.tris[i * 3]);
+            minZ = Math.min(minZ, m.tris[i * 3 + 2]);
+            maxZ = Math.max(maxZ, m.tris[i * 3 + 2]);
+        }
+        if (count == 0) {
+            fpX0 = fpZ0 = 0;
+            fpW = fpH = 0;
+            footprint = new java.util.BitSet();
+            footprintOf = m;
+            return;
+        }
+        fpX0 = (int) Math.floor(minX) - FP_MARGIN - 1;
+        fpZ0 = (int) Math.floor(minZ) - FP_MARGIN - 1;
+        fpW = (int) Math.ceil(maxX) + FP_MARGIN + 2 - fpX0;
+        fpH = (int) Math.ceil(maxZ) + FP_MARGIN + 2 - fpZ0;
+        java.util.BitSet bits = new java.util.BitSet(fpW * fpH);
+        for (int t = 0; t < count; t++) {
+            float tx0 = Float.MAX_VALUE, tz0 = Float.MAX_VALUE, tx1 = -Float.MAX_VALUE, tz1 = -Float.MAX_VALUE;
+            for (int v = 0; v < 3; v++) {
+                tx0 = Math.min(tx0, m.tris[t * 9 + v * 3]);
+                tx1 = Math.max(tx1, m.tris[t * 9 + v * 3]);
+                tz0 = Math.min(tz0, m.tris[t * 9 + v * 3 + 2]);
+                tz1 = Math.max(tz1, m.tris[t * 9 + v * 3 + 2]);
+            }
+            mark(bits, (int) Math.floor(tx0) - FP_MARGIN, (int) Math.floor(tz0) - FP_MARGIN,
+                (int) Math.floor(tx1) + FP_MARGIN, (int) Math.floor(tz1) + FP_MARGIN);
+        }
+        // Dug ground belongs to the map too (its triangles are cut away, its blocks are already there)
+        for (List<int[]> cells : m.dug.values()) {
+            for (int[] c : cells) mark(bits, c[0] - FP_MARGIN, c[2] - FP_MARGIN, c[0] + FP_MARGIN, c[2] + FP_MARGIN);
+        }
+        footprint = bits;
+        footprintOf = m;
+    }
+
+    private static void mark(java.util.BitSet bits, int x0, int z0, int x1, int z1) {
+        x0 = Math.max(x0, fpX0);
+        z0 = Math.max(z0, fpZ0);
+        x1 = Math.min(x1, fpX0 + fpW - 1);
+        z1 = Math.min(z1, fpZ0 + fpH - 1);
+        for (int z = z0; z <= z1; z++) bits.set((z - fpZ0) * fpW + (x0 - fpX0), (z - fpZ0) * fpW + (x1 - fpX0) + 1);
+    }
+
     /** Load the mesh Zelda exported for this scene if it changed. Safe to call from any thread. */
     /** Nearest point on a hookshot-target surface of Hyrule along a segment, or null. */
     public static net.minecraft.world.phys.Vec3 clipHookshot(net.minecraft.world.phys.Vec3 from,

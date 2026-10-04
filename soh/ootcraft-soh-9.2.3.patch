@@ -22,10 +22,10 @@ index 70ea296..897aaf4 100644
  extern "C" ActorDBEntry* ActorDB_Retrieve(const int id) {
 diff --git a/soh/soh/Enhancements/Minecraft/Bridge.h b/soh/soh/Enhancements/Minecraft/Bridge.h
 new file mode 100644
-index 0000000..6d9b35d
+index 0000000..96cfbae
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/Bridge.h
-@@ -0,0 +1,324 @@
+@@ -0,0 +1,329 @@
 +﻿#pragma once
 +
 +// OoTCraft shared-memory bridge between Ship of Harkinian and the hidden Minecraft client ("ootmc" Fabric mod).
@@ -123,6 +123,8 @@ index 0000000..6d9b35d
 +    EV_CELL_AIR = 47,       // x, y, z = a dug block turned out to be open air underground (cave, mineshaft...)
 +    EV_RESET_WORLD = 48,    // delete Minecraft's world and start a fresh one (Esc menu option)
 +    EV_SET_GAMEMODE = 49,   // x = 1 creative, 0 survival (OoTCraft menu option)
++    EV_SET_DIFFICULTY = 50, // x = 0 peaceful, 1 easy, 2 normal, 3 hard (OoTCraft menu option)
++    EV_SET_CHEATS = 51,     // x = 1 commands allowed (OoTCraft menu option)
 +};
 +
 +enum HitKind : int32_t {
@@ -139,6 +141,7 @@ index 0000000..6d9b35d
 +    LINK_HANDOFF = 1 << 1,    // Link is acting on his own (door, chest, ocarina...): Minecraft follows Link
 +    LINK_ZELDA_INPUT = 1 << 2, // keyboard currently belongs to Zelda (dialogue, pause menu, ocarina)
 +    LINK_IN_PLAY = 1 << 3,    // a gameplay scene is loaded
++    LINK_OPEN_WORLD = 1 << 4, // an outdoor area: Minecraft's world surrounds Hyrule's map here
 +};
 +
 +// McState.flags
@@ -347,15 +350,17 @@ index 0000000..6d9b35d
 +namespace Minecraft {
 +// Latest Minecraft player state, or null when Minecraft isn't connected / not in Hyrule
 +const Bridge::McState* McPlayer();
++// Minecraft's player state wherever it is (McPlayer() is only while it's in Hyrule)
++const Bridge::McState* McAnywhere();
 +Bridge::InputState* InputRegion();
 +void HandleCombatEvent(const Bridge::Event& e);
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/Minecraft.h b/soh/soh/Enhancements/Minecraft/Minecraft.h
 new file mode 100644
-index 0000000..48acdf3
+index 0000000..213b479
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/Minecraft.h
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,139 @@
 +﻿#pragma once
 +
 +// "Minecraft Mode": first-person Steve, placeable/breakable blocks and a Minecraft-style HUD layered on top of
@@ -436,6 +441,8 @@ index 0000000..48acdf3
 +void KeepLinkWithSteve();
 +void ForgetDigs();
 +void ClearBlockWorld();
++// Outdoor areas you can dig (not dungeons): Minecraft's own world surrounds the map there
++bool OpenWorldScene(int scene);
 +void BridgeRequestExplosion(const Vec3f& pos, int radiusBlocks);
 +void PushEvent(uint8_t type, int32_t x, int32_t y, int32_t z);
 +void RequestTeleport(const Vec3f& pos, s16 yaw);
@@ -1504,13 +1511,14 @@ index 0000000..6d58e48
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
 new file mode 100644
-index 0000000..ba1c54b
+index 0000000..610886c
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
-@@ -0,0 +1,884 @@
+@@ -0,0 +1,953 @@
 +﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
++#include <algorithm>
 +#include <cmath>
 +#include <cstring>
 +#include <fstream>
@@ -1853,6 +1861,51 @@ index 0000000..ba1c54b
 +                t.flags = SurfaceFlags(&play->colCtx, p, bgId);
 +            }
 +        }
++        // People and things Link can't walk through (Mido, the Kokiri guarding exits, signs, pots, rocks...): their
++        // body cylinders, as solid 8-sided columns, so they stop Steve exactly where they'd stop Link. Only what
++        // pushes Link back without moving itself (heavy or immovable), as Zelda's own collision decides it.
++        CollisionCheckContext* cc = &play->colChkCtx;
++        for (s32 i = 0; i < cc->colOCCount && i < COLLISION_CHECK_OC_MAX && n + 24 <= Bridge::DYNA_MAX_TRIS; i++) {
++            Collider* col = cc->colOC[i];
++            if (col == nullptr || col->actor == nullptr || col->actor == &player->actor ||
++                col->actor == player->heldActor || col->shape != COLSHAPE_CYLINDER) {
++                continue;
++            }
++            if (!(col->ocFlags1 & OC1_ON) || !(col->ocFlags1 & OC1_TYPE_PLAYER) || (col->ocFlags1 & OC1_NO_PUSH) ||
++                col->actor->colChkInfo.mass < MASS_HEAVY) {
++                continue;
++            }
++            const Cylinder16& dim = ((ColliderCylinder*)col)->dim;
++            if (dim.radius <= 0 || dim.height <= 0) {
++                continue;
++            }
++            f32 cx = dim.pos.x, cz = dim.pos.z, y0 = dim.pos.y + dim.yShift, y1 = y0 + dim.height;
++            f32 dx = cx - pp.x, dz = cz - pp.z;
++            if (dx * dx + dz * dz > range * range) {
++                continue;
++            }
++            f32 px[8], pz[8];
++            for (int k = 0; k < 8; k++) {
++                f32 a = k * (6.2831853f / 8.0f);
++                px[k] = cx + cosf(a) * dim.radius;
++                pz[k] = cz + sinf(a) * dim.radius;
++            }
++            auto tri = [&](f32 ax, f32 ay, f32 az, f32 bx, f32 by, f32 bz, f32 qx, f32 qy, f32 qz) {
++                Bridge::DynaTri& t = r.tris[n++];
++                t.v[0] = ax; t.v[1] = ay; t.v[2] = az;
++                t.v[3] = bx; t.v[4] = by; t.v[5] = bz;
++                t.v[6] = qx; t.v[7] = qy; t.v[8] = qz;
++                t.flags = 0;
++            };
++            for (int k = 0; k < 8; k++) {
++                int k2 = (k + 1) % 8;
++                tri(px[k], y0, pz[k], px[k2], y0, pz[k2], px[k2], y1, pz[k2]);
++                tri(px[k], y0, pz[k], px[k2], y1, pz[k2], px[k], y1, pz[k]);
++            }
++            for (int k = 1; k < 7; k++) {
++                tri(px[0], y1, pz[0], px[k], y1, pz[k], px[k + 1], y1, pz[k + 1]); // a lid: things to stand on
++            }
++        }
 +        r.count = n;
 +    });
 +}
@@ -2186,9 +2239,26 @@ index 0000000..ba1c54b
 +        sSentMode = -1;
 +    }
 +    int wantMode = CVarGetInteger(CVAR_MINECRAFT("Creative"), 0) ? 1 : 0;
-+    if (wantMode != sSentMode && sFramesSinceMcBeat == 0 && McPlayer() != nullptr) {
++    if (wantMode != sSentMode && sFramesSinceMcBeat == 0 && McAnywhere() != nullptr) {
 +        PushEvent(Bridge::EV_SET_GAMEMODE, wantMode, 0, 0);
 +        sSentMode = wantMode;
++    }
++    // Difficulty and cheats from the OoTCraft menu, the same way
++    static int sSentDifficulty = -1, sSentCheats = -1;
++    if (sFramesSinceMcBeat > 60) {
++        sSentDifficulty = sSentCheats = -1;
++    }
++    int wantDifficulty = std::clamp(CVarGetInteger(CVAR_MINECRAFT("Difficulty"), 2), 0, 3);
++    int wantCheats = CVarGetInteger(CVAR_MINECRAFT("Cheats"), 0) ? 1 : 0;
++    if (sFramesSinceMcBeat == 0 && McAnywhere() != nullptr) {
++        if (wantDifficulty != sSentDifficulty) {
++            PushEvent(Bridge::EV_SET_DIFFICULTY, wantDifficulty, 0, 0);
++            sSentDifficulty = wantDifficulty;
++        }
++        if (wantCheats != sSentCheats) {
++            PushEvent(Bridge::EV_SET_CHEATS, wantCheats, 0, 0);
++            sSentCheats = wantCheats;
++        }
 +    }
 +}
 +
@@ -2303,6 +2373,10 @@ index 0000000..ba1c54b
 +    return (BridgeConnected() && (sMc.flags & Bridge::MC_IN_HYRULE)) ? &sMc : nullptr;
 +}
 +
++const Bridge::McState* McAnywhere() {
++    return McPlayer();
++}
++
 +void RequestTeleport(const Vec3f& pos, s16 yaw) {
 +    sTeleportPos = pos;
 +    sTeleportYaw = yaw;
@@ -2346,6 +2420,8 @@ index 0000000..ba1c54b
 +    if (block & 0x8000) { // real Minecraft underground: block 100, depth below Hyrule's surface in radius
 +        e.blockId = 100;
 +        e.radius = block & 0x7FFF;
++    } else if (block == 0x7FFE) { // past the edge of the map: the Minecraft world at these very coordinates
++        e.blockId = 101;
 +    } else {
 +        e.blockId = block;
 +    }
@@ -2705,10 +2781,10 @@ index 0000000..2e004f1
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
 new file mode 100644
-index 0000000..d79bf89
+index 0000000..70a34cf
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
-@@ -0,0 +1,1079 @@
+@@ -0,0 +1,1080 @@
 +﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -3509,6 +3585,7 @@ index 0000000..d79bf89
 +    if (PlayerFrozen(play, player)) flags |= Bridge::LINK_FROZEN;
 +    if (HandoffActive()) flags |= Bridge::LINK_HANDOFF;
 +    if (ZeldaWantsInput(play, player)) flags |= Bridge::LINK_ZELDA_INPUT;
++    if (OpenWorldScene(play->sceneNum) && !PaintedRoom(play)) flags |= Bridge::LINK_OPEN_WORLD;
 +    return flags;
 +}
 +
@@ -5119,10 +5196,10 @@ index 0000000..eb7d086
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
 new file mode 100644
-index 0000000..fc95f6a
+index 0000000..cc5979f
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
-@@ -0,0 +1,1397 @@
+@@ -0,0 +1,1420 @@
 +﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -5995,6 +6072,19 @@ index 0000000..fc95f6a
 +    return best;
 +}
 +
++// No level surface anywhere straight above or below: outside Zelda's map (past its edges, the void)
++bool NoMapColumn(PlayState* play, const CellKey& c) {
++    Box b = CellBox(play->sceneNum, c);
++    f32 cx = (b.mn[0] + b.mx[0]) * 0.5f, cy = (b.mn[1] + b.mx[1]) * 0.5f, cz = (b.mn[2] + b.mx[2]) * 0.5f;
++    f32 hitY;
++    if (SurfaceAbove(play, cx, cy, cz, &hitY) != nullptr) {
++        return false;
++    }
++    // Below: the same test from far underneath, with nothing allowed under the block
++    CollisionPoly* below = SurfaceAbove(play, cx, -30000.0f, cz, &hitY);
++    return below == nullptr || hitY > cy;
++}
++
 +// Minecraft blocks the ground turns into (codes understood by the Minecraft side's EV_FILL handler)
 +enum FillBlock : u16 {
 +    FILL_GRASS = 1, FILL_DIRT, FILL_STONE, FILL_SAND, FILL_SANDSTONE, FILL_PLANKS, FILL_PACKED_ICE, FILL_MAGMA,
@@ -6008,6 +6098,8 @@ index 0000000..fc95f6a
 +// overworld has that far under its own surface (stone, deepslate, ores, caves, aquifers, dungeons, mineshafts,
 +// geodes, trial chambers, ancient cities...). Encoded as this flag plus the depth below Hyrule's surface.
 +constexpr u16 kUnderground = 0x8000;
++// Where Hyrule has no map at all: the real Minecraft world at these coordinates (code understood by EV_FILL)
++constexpr u16 kMcWorld = 0x7FFE;
 +
 +// Layers of surface material (grass + dirt, sand + sandstone...) before the real underground starts
 +int SurfaceLayers(u32 material) {
@@ -6282,8 +6374,16 @@ index 0000000..fc95f6a
 +        if (it->second.count(n)) {
 +            continue;
 +        }
-+        OpenGround(play, n, GroundBlockCached(play, n));
++        u16 g = GroundBlockCached(play, n);
++        if (g == 0 && NoMapColumn(play, n)) {
++            g = kMcWorld; // past the edge of Hyrule's map: dig on into Minecraft's world
++        }
++        OpenGround(play, n, g);
 +    }
++}
++
++bool OpenWorldScene(int scene) {
++    return DiggableScene(scene);
 +}
 +
 +// Minecraft found open air at a dug block (a cave, a mineshaft tunnel, a dungeon room...): the ground around it
@@ -6633,16 +6733,20 @@ index 4cf7305..b1fec17 100644
  
 diff --git a/soh/soh/SohGui/SohMenuOoTCraft.cpp b/soh/soh/SohGui/SohMenuOoTCraft.cpp
 new file mode 100644
-index 0000000..e5fc365
+index 0000000..7a3ce18
 --- /dev/null
 +++ b/soh/soh/SohGui/SohMenuOoTCraft.cpp
-@@ -0,0 +1,92 @@
-+#include "SohMenu.h"
+@@ -0,0 +1,104 @@
++﻿#include "SohMenu.h"
 +#include "SohGui.hpp"
 +#include "soh/OTRGlobals.h"
 +#include <soh/Enhancements/Minecraft/Minecraft.h>
 +
 +namespace SohGui {
++
++static const std::map<int32_t, const char*> sDifficulties = {
++    { 0, "Peaceful" }, { 1, "Easy" }, { 2, "Normal" }, { 3, "Hard" }
++};
 +
 +extern std::shared_ptr<SohMenu> mSohMenu;
 +using namespace UIWidgets;
@@ -6668,6 +6772,14 @@ index 0000000..e5fc365
 +        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
 +            "Minecraft creative mode: fly (double-tap Space), every block in the inventory, no damage or hunger. "
 +            "Untick for survival."));
++    AddWidget(path, "Difficulty", WIDGET_CVAR_COMBOBOX)
++        .CVar(CVAR_MINECRAFT("Difficulty"))
++        .Options(ComboboxOptions().ComboMap(sDifficulties).DefaultIndex(2).Tooltip(
++            "Minecraft's difficulty: how hard mobs hit, whether hunger can kill you. Peaceful has no hostile mobs."));
++    AddWidget(path, "Allow Cheats", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_MINECRAFT("Cheats"))
++        .Options(CheckboxOptions().DefaultValue(false).Tooltip(
++            "Minecraft commands (/gamemode, /time, /give, /tp...): press T or / to open the chat and type one."));
 +    AddWidget(path, "Controls", WIDGET_SEPARATOR_TEXT);
 +    AddWidget(path,
 +              "Minecraft mode: WASD / mouse / Space move, look and jump. Left click mines and attacks (Hyrule's ground "

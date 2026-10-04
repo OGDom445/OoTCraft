@@ -250,7 +250,13 @@ public class OotMc implements ModInitializer {
                     // Hyrule ground the player started mining becomes real blocks (no physics: sand stays put)
                     BlockState cur = level.getBlockState(pos);
                     if (cur.isAir() || cur.is(WATER_VOLUME)) {
-                        if (ev.blockId == 100) {
+                        if (ev.blockId == 101) {
+                            // Past the edge of Hyrule's map: the Minecraft world at these very coordinates. Broke into
+                            // a cave: Zelda opens it up around the player (open sky stays unrevealed)
+                            if (!Underground.fillWorld(level, pos) && Underground.belowWorldSurface(level, pos)) {
+                                bridge.pushEvent(Bridge.EV_CELL_AIR, pos.getX(), pos.getY(), pos.getZ());
+                            }
+                        } else if (ev.blockId == 100) {
                             // Deeper down: the real 1.21 underground
                             if (!Underground.fill(level, pos, ev.radius)) {
                                 bridge.pushEvent(Bridge.EV_CELL_AIR, pos.getX(), pos.getY(), pos.getZ());
@@ -277,12 +283,24 @@ public class OotMc implements ModInitializer {
                     for (ServerPlayer p : level.getServer().getPlayerList().getPlayers()) applyGameMode(p);
                     LOGGER.info("[OoTCraft] game mode from Zelda's menu: {}", ev.x == 1 ? "creative" : "survival");
                 }
+                case Bridge.EV_SET_DIFFICULTY -> level.getServer().setDifficulty(
+                    net.minecraft.world.Difficulty.byId(Math.max(0, Math.min(3, ev.x))), true);
+                case Bridge.EV_SET_CHEATS -> {
+                    // Commands on or off for the player, like "Allow Cheats" when opening a world to LAN
+                    var server = level.getServer();
+                    server.getPlayerList().setAllowCommandsForAllPlayers(ev.x == 1);
+                    for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+                        server.getPlayerList().sendPlayerPermissionLevel(p);
+                    }
+                    LOGGER.info("[OoTCraft] cheats {}", ev.x == 1 ? "on" : "off");
+                }
                 default -> {}
             }
         }
 
         ZeldaItems.tickGrapples(level);
         collectDrops(level);
+        Frontier.cleanup(level);
         buildWater(level, 20000);
         syncProxies(level, bridge, link.scene());
 

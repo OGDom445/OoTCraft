@@ -62,6 +62,50 @@ public final class Underground {
     }
 
     /**
+     * Hyrule's own height (Zelda's ground level, Minecraft y 128) lines up with the generated world's sea level:
+     * past the edges of the map, Minecraft's world continues at the same coordinates, this many blocks higher.
+     */
+    public static final int WORLD_Y_SHIFT = Bridge.ORIGIN_Y_BLOCKS - 64;
+
+    /** Fill a dug block past the edge of the map with the Minecraft world's block there (air stays air). */
+    static boolean fillWorld(ServerLevel hyrule, BlockPos pos) {
+        ServerLevel deep = hyrule.getServer().getLevel(DEEP);
+        if (deep == null) return false;
+        BlockPos from = pos.below(WORLD_Y_SHIFT);
+        if (from.getY() < deep.getMinBuildHeight()) return false;
+        BlockState state = deep.getBlockState(from);
+        if (state.isAir()) return false;
+        hyrule.setBlock(pos, state, Block.UPDATE_CLIENTS);
+        copyBlockEntity(deep, from, hyrule, pos);
+        return true;
+    }
+
+    /** Is this spot (past the edge of the map) under the Minecraft world's ground, i.e. in a cave? */
+    static boolean belowWorldSurface(ServerLevel hyrule, BlockPos pos) {
+        ServerLevel deep = hyrule.getServer().getLevel(DEEP);
+        if (deep == null) return false;
+        var source = deep.getChunkSource();
+        int surface = source.getGenerator().getBaseHeight(pos.getX(), pos.getZ(), Heightmap.Types.OCEAN_FLOOR_WG, deep,
+            source.randomState());
+        return pos.getY() - WORLD_Y_SHIFT < surface - 1;
+    }
+
+    /** A chest's contents, a spawner's mob... copied along with the block. */
+    static void copyBlockEntity(ServerLevel deep, BlockPos from, ServerLevel hyrule, BlockPos pos) {
+        BlockEntity src = deep.getBlockEntity(from);
+        if (src == null) return;
+        CompoundTag tag = src.saveWithoutMetadata(hyrule.registryAccess());
+        // Minecraft's mobs aren't drawn in Zelda's view: spawners stay as blocks but never wake up
+        if (tag.contains("RequiredPlayerRange")) tag.putShort("RequiredPlayerRange", (short) 0);
+        if (tag.contains("required_player_range")) tag.putInt("required_player_range", 0);
+        BlockEntity dst = hyrule.getBlockEntity(pos);
+        if (dst != null) {
+            dst.loadWithComponents(tag, hyrule.registryAccess());
+            dst.setChanged();
+        }
+    }
+
+    /**
      * Drill a 16x16 core down from the deep world's surface to bedrock under a Hyrule column and count what's in it
      * (proof of what digging there will find). Returned as a readable summary.
      */

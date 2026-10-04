@@ -333,9 +333,10 @@ public class OotMcClient implements ClientModInitializer {
         if (p == null || mc.level == null || mc.level.dimension() != OotMc.HYRULE || frozen) return;
         com.ootmc.CollisionField.Mesh m = com.ootmc.CollisionField.mesh();
         if (m == null || m.scene != currentScene) return;
-        if (p.onGround() && p.getY() >= m.lowestY - 44) {
+        if (p.onGround()) {
             lastSafe = p.position();
-        } else if (p.getY() < m.lowestY - 48) { // below bedrock: nothing down there
+        } else if (p.getY() < m.lowestY - 48 && p.getDeltaMovement().y < 0 && nothingBelow(mc, p)) {
+            // falling where there's nothing at all (deep tunnels and Minecraft's world past the map are fine)
             long now = System.currentTimeMillis();
             p.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
             p.resetFallDistance();
@@ -352,6 +353,15 @@ public class OotMcClient implements ClientModInitializer {
             }
             lastVoidCatch = now;
         }
+    }
+
+    private static boolean nothingBelow(Minecraft mc, LocalPlayer p) {
+        net.minecraft.core.BlockPos.MutableBlockPos pos = p.blockPosition().mutable();
+        for (int y = pos.getY(); y >= mc.level.getMinBuildHeight(); y--) {
+            pos.setY(y);
+            if (!mc.level.getBlockState(pos).isAir()) return false;
+        }
+        return true;
     }
 
     /** Holding attack on Zelda's ground: ask Zelda to turn that ground into blocks, which then mine normally. */

@@ -36,10 +36,11 @@ public final class Bridge {
     public static final int EV_PLAYER_HURT = 21, EV_PLAYER_HEAL = 22, EV_NUDGE = 23, EV_FILL = 4;
     public static final int EV_PLAYER_DIED = 40, EV_HIT_ACTOR = 41, EV_CARVE = 42, EV_BLOCK_BROKEN = 43, EV_BLAST = 44,
         EV_USE_ZELDA_ITEM = 45, EV_VOID_OUT = 46, EV_CELL_AIR = 47, EV_RESET_WORLD = 48,
-        EV_SET_GAMEMODE = 49;
+        EV_SET_GAMEMODE = 49, EV_SET_DIFFICULTY = 50, EV_SET_CHEATS = 51;
 
     // LinkState flags
-    public static final int LINK_FROZEN = 1, LINK_HANDOFF = 2, LINK_ZELDA_INPUT = 4, LINK_IN_PLAY = 8;
+    public static final int LINK_FROZEN = 1, LINK_HANDOFF = 2, LINK_ZELDA_INPUT = 4, LINK_IN_PLAY = 8,
+        LINK_OPEN_WORLD = 16; // an outdoor area: Minecraft's world surrounds Hyrule's map
     // McState flags
     public static final int MC_IN_HYRULE = 1, MC_SCREEN_OPEN = 2, MC_ON_GROUND = 4, MC_SWIMMING = 8,
         MC_SNEAKING = 16, MC_DEAD = 32, MC_THIRD_PERSON = 64, MC_CRAWLING = 128;
