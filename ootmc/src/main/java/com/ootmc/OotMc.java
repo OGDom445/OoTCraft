@@ -489,18 +489,19 @@ public class OotMc implements ModInitializer {
     }
 
     /**
-     * Mined blocks drop their item, but Zelda's view doesn't draw dropped items, so drops near the player fly
-     * straight to them (anything the player threw away themselves stays where it fell).
+     * Drops lie on Hyrule's ground and Zelda draws them (DropShare), so they're picked up as in Minecraft. Only an
+     * item that fell out of the world (under Hyrule's lowest ground) is brought back to the player.
      */
     private static void collectDrops(ServerLevel level) {
+        CollisionField.Mesh m = CollisionField.mesh();
+        if (m == null) return;
         for (ServerPlayer p : level.players()) {
             if (p.isSpectator() || p.isDeadOrDying()) continue;
             for (net.minecraft.world.entity.item.ItemEntity item : level.getEntitiesOfClass(
-                    net.minecraft.world.entity.item.ItemEntity.class, p.getBoundingBox().inflate(8.0))) {
-                if (item.getOwner() != null || item.isRemoved()) continue;
-                item.setNoPickUpDelay();
-                item.setPos(p.getX(), p.getY() + 0.25, p.getZ());
-                item.playerTouch(p);
+                    net.minecraft.world.entity.item.ItemEntity.class, p.getBoundingBox().inflate(48.0, 400.0, 48.0))) {
+                if (item.isRemoved() || item.getY() > m.lowestY - 48) continue;
+                item.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
+                item.setPos(p.getX(), p.getY() + 0.5, p.getZ());
             }
         }
     }

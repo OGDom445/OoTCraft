@@ -38,6 +38,8 @@ public final class CollisionField {
         /** Fingerprint of each section's triangles, so a reload only rebuilds the sections that changed */
         final Map<Long, Integer> bucketHash = new HashMap<>();
         final List<short[]> water = new ArrayList<>(); // xMin, ySurface, zMin, xLength, zLength (OoT units)
+        /** Dug blocks by section: Zelda's collision inside them is gone, whatever the cut left (block x, y, z) */
+        final Map<Long, List<int[]>> dug = new HashMap<>();
 
         public int scene() {
             return scene;
@@ -195,6 +197,17 @@ public final class CollisionField {
                 for (int k = 0; k < 5; k++) w[k] = b.getShort(wo + i * 12 + k * 2);
                 nm.water.add(w);
             }
+            int dugAt = wo + waterCount * 12;
+            if (b.capacity() >= dugAt + 8 && b.getInt(dugAt) == 0x31475544) {
+                int dugCount = b.getInt(dugAt + 4);
+                if (dugCount >= 0 && dugCount <= 4_000_000 && dugAt + 8L + dugCount * 12L <= b.capacity()) {
+                    for (int i = 0; i < dugCount; i++) {
+                        int[] c = { b.getInt(dugAt + 8 + i * 12), b.getInt(dugAt + 12 + i * 12), b.getInt(dugAt + 16 + i * 12) };
+                        long key = OotMc.sectionKey(Math.floorDiv(c[0], 16), Math.floorDiv(c[1], 16), Math.floorDiv(c[2], 16));
+                        nm.dug.computeIfAbsent(key, k -> new ArrayList<>()).add(c);
+                    }
+                }
+            }
             // bucket triangles by every section their bounds touch
             for (int i = 0; i < count; i++) {
                 float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
@@ -229,6 +242,7 @@ public final class CollisionField {
                     for (int c = 0; c < 9; c++) h = h * 31 + Float.floatToIntBits(tris[t * 9 + c]);
                     h = h * 31 + flags[t];
                 }
+                for (int[] c : nm.dug.getOrDefault(e.getKey(), List.of())) h = (h * 31 + c[0]) * 31 + c[1] * 7 + c[2];
                 nm.bucketHash.put(e.getKey(), h);
             }
             // Digging changes a few sections: keep every other section's collision instead of re-voxelizing them
@@ -325,7 +339,7 @@ public final class CollisionField {
             // Crawlspace walls (flag 4) aren't solid: they're where Steve crawls in
             int[] solid = new int[list[0] + 1];
             for (int k = 1; k <= list[0]; k++) if ((m.flags[list[k]] & 4) == 0) solid[++solid[0]] = list[k];
-            s = voxelize(m.tris, solid, 1, solid[0], sx * 16.0, sy * 16.0, sz * 16.0, RES, 2);
+            s = voxelize(m.tris, solid, 1, solid[0], sx * 16.0, sy * 16.0, sz * 16.0, RES, 2, m.dug.get(key));
         }
         if (cache.size() > 4000) cache.clear();
         cache.put(key, s);
@@ -369,6 +383,12 @@ public final class CollisionField {
      * project along each triangle's dominant axis, thicken `thick` cells into the surface, and greedily merge.
      */
     static Section voxelize(float[] tris, int[] list, int from, int to, double ox, double oy, double oz, int res, int thick) {
+        return voxelize(tris, list, from, to, ox, oy, oz, res, thick, null);
+    }
+
+    /** As above, then empties the dug blocks ("clear", block coordinates): mined Hyrule ground is always open. */
+    static Section voxelize(float[] tris, int[] list, int from, int to, double ox, double oy, double oz, int res, int thick,
+                            List<int[]> clear) {
         final int n = 128;
         long[] bits = new long[n * n * n / 64];
         double[] p = new double[9];
@@ -418,6 +438,17 @@ public final class CollisionField {
                         bits[index >>> 6] |= 1L << (index & 63);
                     }
                 }
+            }
+        }
+        if (clear != null) {
+            for (int[] c : clear) {
+                int x0 = (int) Math.round((c[0] - ox) * res), y0 = (int) Math.round((c[1] - oy) * res), z0 = (int) Math.round((c[2] - oz) * res);
+                for (int y = Math.max(0, y0); y < Math.min(n, y0 + res); y++)
+                    for (int z = Math.max(0, z0); z < Math.min(n, z0 + res); z++)
+                        for (int x = Math.max(0, x0); x < Math.min(n, x0 + res); x++) {
+                            int index = (y * n + z) * n + x;
+                            bits[index >>> 6] &= ~(1L << (index & 63));
+                        }
             }
         }
         return merge(bits, n, ox, oy, oz, res);

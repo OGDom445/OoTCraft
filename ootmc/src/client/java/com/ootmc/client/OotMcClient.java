@@ -485,6 +485,7 @@ public class OotMcClient implements ClientModInitializer {
         bridge.beatMc();
         if (player == null || mc.level == null) return;
         boolean inHyrule = mc.level.dimension() == OotMc.HYRULE;
+        DropShare.publish(mc, currentScene); // items on the ground, for Zelda to draw
         float partial = mc.getTimer().getGameTimeDeltaPartialTick(true);
         Vec3 feet = player.getPosition(partial);
         Vec3 eye = player.getEyePosition(partial);

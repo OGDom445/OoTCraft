@@ -1,20 +1,22 @@
 diff --git a/soh/soh/ActorDB.cpp b/soh/soh/ActorDB.cpp
-index 70ea296..ae67cb3 100644
+index 70ea296..897aaf4 100644
 --- a/soh/soh/ActorDB.cpp
 +++ b/soh/soh/ActorDB.cpp
 @@ -1,4 +1,5 @@
- #include "ActorDB.h"
+-#include "ActorDB.h"
++﻿#include "ActorDB.h"
 +#include "soh/Enhancements/Minecraft/Minecraft.h"
  
  #include <assert.h>
  
-@@ -614,6 +615,9 @@ extern "C" s16 gEnPartnerId;
+@@ -614,6 +615,10 @@ extern "C" s16 gEnPartnerId;
  
  void ActorDB::AddBuiltInCustomActors() {
      gEnPartnerId = ActorDB::Instance->AddEntry(EnPartnerInit).entry.id;
 +    Minecraft::RegisterChunkActor();
 +    Minecraft::RegisterAttackerActor();
 +    Minecraft::RegisterTerrainPatchActor();
++    Minecraft::RegisterDropActor();
  }
  
  extern "C" ActorDBEntry* ActorDB_Retrieve(const int id) {
@@ -350,11 +352,11 @@ index 0000000..6d9b35d
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/Minecraft.h b/soh/soh/Enhancements/Minecraft/Minecraft.h
 new file mode 100644
-index 0000000..57558a6
+index 0000000..48acdf3
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/Minecraft.h
-@@ -0,0 +1,132 @@
-+#pragma once
+@@ -0,0 +1,137 @@
++﻿#pragma once
 +
 +// "Minecraft Mode": first-person Steve, placeable/breakable blocks and a Minecraft-style HUD layered on top of
 +// the full game. The C entry points below are called from small hooks in the decomp sources.
@@ -420,6 +422,9 @@ index 0000000..57558a6
 +
 +// Block world
 +void SpawnChunkActors(PlayState* play);
++// Items lying on the ground in Minecraft, drawn in Hyrule (MinecraftDrops.cpp)
++void RegisterDropActor();
++void SpawnDropActor(PlayState* play);
 +void RegisterChunkActor();
 +void RegisterAttackerActor();
 +
@@ -450,6 +455,8 @@ index 0000000..57558a6
 +    void* src; // the CollisionPoly it was cut from
 +};
 +void AppendTerrainPieces(std::vector<TerrainPiece>& out);
++// Every block of this scene's ground that has been dug (x, y, z triples, Minecraft block coordinates)
++void AppendDugCells(int scene, std::vector<int32_t>& out);
 +bool IsTerrainPatchActor(::Actor* actor);
 +void RegisterTerrainPatchActor();
 +// Zelda's collision triangles store two of their corner indices in 13 bits, so all moving collision in a scene
@@ -1497,10 +1504,10 @@ index 0000000..6d58e48
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
 new file mode 100644
-index 0000000..b119e60
+index 0000000..ba1c54b
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftBridge.cpp
-@@ -0,0 +1,876 @@
+@@ -0,0 +1,884 @@
 +﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -1786,6 +1793,13 @@ index 0000000..b119e60
 +            int16_t wb[6] = { w.xMin, w.ySurface, w.zMin, w.xLength, w.zLength, 0 };
 +            out.write((const char*)wb, sizeof(wb));
 +        }
++        // Dug blocks (Minecraft block coordinates): "DUG1", count, count * { x, y, z }. Whatever the cutting left
++        // behind, Minecraft treats Zelda's collision inside these as gone: each one is a real block or open air
++        std::vector<int32_t> dug;
++        AppendDugCells(play->sceneNum, dug);
++        uint32_t dugHeader[2] = { 0x31475544, (uint32_t)(dug.size() / 3) };
++        out.write((const char*)dugHeader, sizeof(dugHeader));
++        out.write((const char*)dug.data(), dug.size() * sizeof(int32_t));
 +    }
 +#ifdef _WIN32
 +    MoveFileExA(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
@@ -2222,6 +2236,7 @@ index 0000000..b119e60
 +        auto off = sGridOffsets.find(play->sceneNum);
 +        sGridYOffset = off != sGridOffsets.end() ? off->second : 0;
 +        SpawnChunkActors(play);
++        SpawnDropActor(play);
 +        RequestTeleport(p->actor.world.pos, p->actor.shape.rot.y);
 +    }
 +    if (sTeleportPending) {
@@ -2690,10 +2705,10 @@ index 0000000..2e004f1
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
 new file mode 100644
-index 0000000..910295c
+index 0000000..d79bf89
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftControls.cpp
-@@ -0,0 +1,1040 @@
+@@ -0,0 +1,1079 @@
 +﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -3228,6 +3243,15 @@ index 0000000..910295c
 +            if (vk[i] == sPrevVk[i] || (i == VK_ESCAPE && sSwallowEsc)) {
 +                continue;
 +            }
++            if (i == VK_TAB && mcScreen) {
++                // Tab closes Minecraft's menus (inventory, crafting table, chests): a key neither game uses there,
++                // unlike Esc, which is also Ship of Harkinian's menu
++                if (vk[i]) {
++                    PushEvent(Bridge::EV_KEY, 256, 1, 0);
++                    PushEvent(Bridge::EV_KEY, 256, 0, 0);
++                }
++                continue;
++            }
 +            int key = VkToGlfw(i);
 +            if ((key == 256 || key == 257) && !mcScreen) {
 +                continue; // Esc is the SoH menu; Enter opens Zelda's pause menu (items, map, quest status)
@@ -3725,6 +3749,36 @@ index 0000000..910295c
 +    int pendingX = std::clamp((int)(int16_t)((int16_t)sMouseDxTotal - appliedX), -400, 400);
 +    int pendingY = std::clamp((int)(int16_t)((int16_t)sMouseDyTotal - appliedY), -400, 400);
 +    s16 yaw = (s16)lroundf(mc.yaw + sYawPerPx * pendingX);
++    // Smoothness check (logged every 10 s while turning): frames that turned, and frames that jerked back against
++    // the way the mouse is going
++    {
++        static s16 sPrevYaw = 0;
++        static int32_t sPrevMouse = 0;
++        static uint32_t sTurnFrames = 0, sBackFrames = 0, sStillFrames = 0;
++        static int64_t sStatStart = 0;
++        int dMouse = (int)(sMouseDxTotal - sPrevMouse);
++        int dYaw = (s16)(yaw - sPrevYaw);
++        if (dMouse != 0) {
++            sTurnFrames++;
++            if (sYawPerPx != 0.0f && (float)dYaw * sYawPerPx * dMouse < 0.0f) {
++                sBackFrames++;
++            }
++        } else if (dYaw == 0) {
++            sStillFrames++;
++        }
++        sPrevYaw = yaw;
++        sPrevMouse = sMouseDxTotal;
++        if (sStatStart == 0) {
++            sStatStart = now;
++        } else if (now - sStatStart > 10000000) {
++            if (sTurnFrames > 0) {
++                SPDLOG_INFO("[OoTCraft] looking around: {} frames with mouse movement, {} jerked back", sTurnFrames,
++                            sBackFrames);
++            }
++            sTurnFrames = sBackFrames = sStillFrames = 0;
++            sStatStart = now;
++        }
++    }
 +    // Straight up or down, the view direction lines up with "up" and the view matrix breaks (the glitch looking
 +    // all the way up/down): stop a hair short of vertical, which looks the same
 +    s16 pitch = (s16)std::clamp(lroundf(mc.pitch + sPitchPerPx * pendingY), -16290L, 16290L);
@@ -3734,6 +3788,286 @@ index 0000000..910295c
 +    *key = play->view.viewingPtr;
 +    return true;
 +}
+diff --git a/soh/soh/Enhancements/Minecraft/MinecraftDrops.cpp b/soh/soh/Enhancements/Minecraft/MinecraftDrops.cpp
+new file mode 100644
+index 0000000..b7b4adf
+--- /dev/null
++++ b/soh/soh/Enhancements/Minecraft/MinecraftDrops.cpp
+@@ -0,0 +1,274 @@
++﻿#include "Minecraft.h"
++#include "Bridge.h"
++
++#include <algorithm>
++#include <atomic>
++#include <cmath>
++#include <cstring>
++#include <map>
++#include <memory>
++#include <string>
++
++#include <libultraship/libultraship.h>
++#include "soh/ActorDB.h"
++#include "soh/frame_interpolation.h"
++
++extern "C" {
++#include "z64.h"
++#include "macros.h"
++#include "functions.h"
++#include "variables.h"
++}
++
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#define NOMINMAX
++#include <Windows.h>
++#else
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#endif
++
++// Items lying on the ground in Minecraft (thrown with Q, dropped by mobs, popped out of mined blocks), drawn in
++// Hyrule the way Minecraft draws them: blocks as small spinning cubes, everything else as a spinning icon.
++// Minecraft shares them through %TEMP%/oot_mc_drops.bin (layout in DropShare.java).
++
++namespace Minecraft {
++
++namespace {
++
++constexpr int kMaxDrops = 128, kSlots = 256, kEntries = 64, kVersions = kEntries + kMaxDrops * 32,
++              kPixels = kVersions + kSlots * 4, kSize = kPixels + kSlots * 1024;
++
++struct DropEntry {
++    f32 x, y, z, spin, bob;
++    uint32_t slot, flags, id;
++};
++static_assert(sizeof(DropEntry) == 32, "layout");
++
++uint8_t* sView = nullptr;
++s16 sDropActorId = -1;
++
++bool OpenDrops() {
++    if (sView != nullptr) {
++        return true;
++    }
++    std::string path = std::string(Bridge::TempDirPath()) + "oot_mc_drops.bin";
++#ifdef _WIN32
++    HANDLE file = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
++                              OPEN_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
++    if (file == INVALID_HANDLE_VALUE) {
++        return false;
++    }
++    HANDLE map = CreateFileMappingA(file, nullptr, PAGE_READWRITE, 0, kSize, nullptr);
++    CloseHandle(file);
++    if (map == nullptr) {
++        return false;
++    }
++    sView = (uint8_t*)MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, kSize);
++    CloseHandle(map);
++#else
++    int fd = open(path.c_str(), O_RDWR | O_CREAT, 0600);
++    if (fd < 0) {
++        return false;
++    }
++    struct stat st {};
++    if (fstat(fd, &st) != 0 || (st.st_size < kSize && ftruncate(fd, kSize) != 0)) {
++        close(fd);
++        return false;
++    }
++    void* mapped = mmap(nullptr, kSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    close(fd);
++    sView = mapped == MAP_FAILED ? nullptr : (uint8_t*)mapped;
++#endif
++    return sView != nullptr;
++}
++
++// This tick's drops, copied out of shared memory (seqlock)
++DropEntry sDrops[kMaxDrops];
++int sCount = 0;
++
++// Icons by (slot, version): each kept at its own address for good, since the renderer caches textures by address
++std::map<uint64_t, std::unique_ptr<uint8_t[]>> sIcons;
++const uint8_t* sSlotIcon[kSlots] = {};
++uint32_t sSlotVersion[kSlots] = {};
++
++void ReadDrops(PlayState* play) {
++    sCount = 0;
++    if (!OpenDrops()) {
++        return;
++    }
++    Bridge::AtomicRef<uint32_t> seq(*(uint32_t*)sView);
++    for (int tries = 0; tries < 4; tries++) {
++        uint32_t s1 = seq.load(std::memory_order_acquire);
++        if (s1 & 1) {
++            continue;
++        }
++        int n = std::min<int>(*(uint32_t*)(sView + 4), kMaxDrops);
++        int scene = *(int32_t*)(sView + 8);
++        memcpy(sDrops, sView + kEntries, n * sizeof(DropEntry));
++        uint32_t versions[kSlots];
++        memcpy(versions, sView + kVersions, sizeof(versions));
++        std::atomic_thread_fence(std::memory_order_acquire);
++        if (seq.load(std::memory_order_relaxed) != s1) {
++            continue;
++        }
++        if (scene != play->sceneNum) {
++            return;
++        }
++        sCount = n;
++        for (int i = 0; i < n; i++) {
++            uint32_t slot = sDrops[i].slot;
++            if (slot >= kSlots) {
++                sDrops[i].slot = 0;
++                continue;
++            }
++            if (sSlotVersion[slot] != versions[slot] || sSlotIcon[slot] == nullptr) {
++                uint64_t key = ((uint64_t)slot << 32) | versions[slot];
++                auto& icon = sIcons[key];
++                if (icon == nullptr) {
++                    icon = std::make_unique<uint8_t[]>(16 * 16 * 4 + 8);
++                    // 8-byte aligned for the texture loader
++                    memcpy(icon.get(), sView + kPixels + slot * 1024, 1024);
++                }
++                sSlotIcon[slot] = icon.get();
++                sSlotVersion[slot] = versions[slot];
++            }
++        }
++        return;
++    }
++}
++
++// Geometry in 1/32 of a block: a flat icon half a block wide, a cube a quarter block across
++void SetVtx(Vtx& v, int x, int y, int z, int s, int t) {
++    v = {};
++    v.v.ob[0] = (s16)x;
++    v.v.ob[1] = (s16)y;
++    v.v.ob[2] = (s16)z;
++    v.v.tc[0] = (s16)(s << 5);
++    v.v.tc[1] = (s16)(t << 5);
++    v.v.cn[0] = v.v.cn[1] = v.v.cn[2] = 255;
++    v.v.cn[3] = 255;
++}
++
++Vtx* IconQuad(GraphicsContext* gfxCtx) {
++    Vtx* v = (Vtx*)Graph_Alloc(gfxCtx, 4 * sizeof(Vtx));
++    SetVtx(v[0], -8, 0, 0, 0, 16);
++    SetVtx(v[1], 8, 0, 0, 16, 16);
++    SetVtx(v[2], 8, 16, 0, 16, 0);
++    SetVtx(v[3], -8, 16, 0, 0, 0);
++    return v;
++}
++
++Vtx* Cube(GraphicsContext* gfxCtx) {
++    // 6 faces, 4 corners each, wound counter-clockwise from outside
++    static const s8 kFaces[6][4][3] = {
++        { { -1, -1, 1 }, { 1, -1, 1 }, { 1, 1, 1 }, { -1, 1, 1 } },     // +z
++        { { 1, -1, -1 }, { -1, -1, -1 }, { -1, 1, -1 }, { 1, 1, -1 } }, // -z
++        { { 1, -1, 1 }, { 1, -1, -1 }, { 1, 1, -1 }, { 1, 1, 1 } },     // +x
++        { { -1, -1, -1 }, { -1, -1, 1 }, { -1, 1, 1 }, { -1, 1, -1 } }, // -x
++        { { -1, 1, 1 }, { 1, 1, 1 }, { 1, 1, -1 }, { -1, 1, -1 } },     // top
++        { { -1, -1, -1 }, { 1, -1, -1 }, { 1, -1, 1 }, { -1, -1, 1 } }, // bottom
++    };
++    static const int kUv[4][2] = { { 0, 16 }, { 16, 16 }, { 16, 0 }, { 0, 0 } };
++    static const u8 kShade[6] = { 204, 204, 153, 153, 255, 127 }; // Minecraft's side / top / bottom shading
++    Vtx* v = (Vtx*)Graph_Alloc(gfxCtx, 24 * sizeof(Vtx));
++    for (int f = 0; f < 6; f++) {
++        for (int k = 0; k < 4; k++) {
++            Vtx& o = v[f * 4 + k];
++            SetVtx(o, kFaces[f][k][0] * 4, 4 + kFaces[f][k][1] * 4, kFaces[f][k][2] * 4, kUv[k][0], kUv[k][1]);
++            o.v.cn[0] = o.v.cn[1] = o.v.cn[2] = kShade[f];
++        }
++    }
++    return v;
++}
++
++void McDrops_Init(Actor* thisx, PlayState* play) {
++    thisx->room = -1; // stays across room changes
++}
++
++void McDrops_Update(Actor* thisx, PlayState* play) {
++    ReadDrops(play);
++}
++
++} // namespace
++
++void McDrops_Draw(Actor* thisx, PlayState* play) {
++    if (sCount == 0) {
++        return;
++    }
++    GraphicsContext* gfxCtx = play->state.gfxCtx;
++    Gfx_SetupDL_25Xlu(gfxCtx);
++    Vtx* quad = IconQuad(gfxCtx);
++    Vtx* cube = Cube(gfxCtx);
++    Gfx*& g = gfxCtx->polyXlu.p;
++    gDPPipeSync(g++);
++    gSPClearGeometryMode(g++, G_LIGHTING | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR | G_FOG | G_CULL_BOTH);
++    gSPSetGeometryMode(g++, G_SHADE | G_SHADING_SMOOTH);
++    gDPSetCycleType(g++, G_CYC_1CYCLE); // (see the mining cracks: two-cycle samples an empty second texture)
++    gDPSetRenderMode(g++, G_RM_ZB_XLU_SURF, G_RM_ZB_XLU_SURF2);
++    gDPSetTextureFilter(g++, G_TF_POINT);
++    gSPTexture(g++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
++    gDPSetCombineMode(g++, G_CC_MODULATEIDECALA, G_CC_MODULATEIDECALA);
++    const f32 scale = BLOCK_SIZE / 32.0f;
++    for (int i = 0; i < sCount; i++) {
++        const DropEntry& d = sDrops[i];
++        const uint8_t* icon = sSlotIcon[d.slot];
++        if (icon == nullptr) {
++            continue;
++        }
++        bool block = (d.flags & 1) != 0;
++        FrameInterpolation_RecordOpenChild(&sDrops, (int)d.id);
++        Matrix_Translate(d.x, d.y + d.bob, d.z, MTXMODE_NEW);
++        Matrix_RotateY(d.spin, MTXMODE_APPLY);
++        Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
++        gSPMatrix(g++, MATRIX_NEWMTX(gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
++        gDPPipeSync(g++);
++        gDPLoadTextureBlock(g++, (void*)icon, G_IM_FMT_RGBA, G_IM_SIZ_32b, 16, 16, 0, G_TX_NOMIRROR | G_TX_CLAMP,
++                            G_TX_NOMIRROR | G_TX_CLAMP, 4, 4, G_TX_NOLOD, G_TX_NOLOD);
++        if (block) {
++            gSPSetGeometryMode(g++, G_CULL_BACK);
++            for (int batch = 0; batch < 3; batch++) {
++                gSPVertex(g++, (uintptr_t)&cube[batch * 8], 8, 0);
++                gSP2Triangles(g++, 0, 1, 2, 0, 0, 2, 3, 0);
++                gSP2Triangles(g++, 4, 5, 6, 0, 4, 6, 7, 0);
++            }
++            gSPClearGeometryMode(g++, G_CULL_BACK);
++        } else {
++            gSPVertex(g++, (uintptr_t)quad, 4, 0);
++            gSP2Triangles(g++, 0, 1, 2, 0, 0, 2, 3, 0); // both sides: culling is off
++        }
++        FrameInterpolation_RecordCloseChild();
++    }
++    gDPSetTextureFilter(g++, G_TF_BILERP);
++    gDPPipeSync(g++);
++    gDPSetCycleType(g++, G_CYC_2CYCLE); // back to what Zelda's own translucent drawing expects
++}
++
++void RegisterDropActor() {
++    static ActorDBInit init = {
++        "Mc_Drops",
++        "Minecraft Dropped Items",
++        ACTORCAT_MISC,
++        (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
++        OBJECT_GAMEPLAY_KEEP,
++        sizeof(Actor),
++        (ActorFunc)McDrops_Init,
++        nullptr,
++        (ActorFunc)McDrops_Update,
++        (ActorFunc)McDrops_Draw,
++        nullptr,
++    };
++    sDropActorId = ActorDB::Instance->AddEntry(init).entry.id;
++}
++
++// One per scene: called with the chunk actors when a scene (re)loads
++void SpawnDropActor(PlayState* play) {
++    if (sDropActorId >= 0) {
++        Actor_Spawn(&play->actorCtx, play, sDropActorId, 0, 0, 0, 0, 0, 0, 0);
++    }
++}
++
++} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftHud.cpp b/soh/soh/Enhancements/Minecraft/MinecraftHud.cpp
 new file mode 100644
 index 0000000..4f6b854
@@ -3860,10 +4194,10 @@ index 0000000..1165243
 +} // namespace Minecraft
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp b/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp
 new file mode 100644
-index 0000000..668fc99
+index 0000000..1edf9c7
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftOverlay.cpp
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,307 @@
 +﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
@@ -4041,24 +4375,42 @@ index 0000000..668fc99
 +
 +    void DrawElement() override {
 +        // Frame rate log (every 10 s) to keep an eye on performance
-+        static uint32_t sFrames = 0, sHitches = 0;
-+        static uint64_t sFpsStart = 0, sLastFrame = 0, sWorst = 0;
-+        uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
-+                           std::chrono::steady_clock::now().time_since_epoch())
-+                           .count();
++        static uint32_t sFrames = 0, sHitches = 0, sTickFrames = 0;
++        static uint64_t sFpsStart = 0, sLastFrame = 0, sWorst = 0, sTickUs = 0, sDrawUs = 0, sLastUs = 0;
++        static uint32_t sLastTick = 0;
++        uint64_t nowUs = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
++                             std::chrono::steady_clock::now().time_since_epoch())
++                             .count();
++        uint64_t now = nowUs / 1000;
 +        sFrames++;
 +        if (sLastFrame != 0) {
 +            uint64_t dt = now - sLastFrame;
 +            sWorst = std::max(sWorst, dt);
 +            sHitches += dt > 25 ? 1 : 0;
++            // Frame gaps that include a game tick (Zelda's 20 Hz update) vs ordinary in-between frames
++            uint32_t tick = gPlayState != nullptr ? gPlayState->gameplayFrames : 0;
++            if (tick != sLastTick) {
++                sTickFrames++;
++                sTickUs += nowUs - sLastUs;
++            } else {
++                sDrawUs += nowUs - sLastUs;
++            }
++            sLastTick = tick;
 +        }
++        sLastUs = nowUs;
 +        sLastFrame = now;
 +        if (sFpsStart == 0) {
 +            sFpsStart = now;
 +        } else if (now - sFpsStart >= 10000) {
-+            SPDLOG_INFO("[OoTCraft] Zelda drawing {:.0f} FPS, slowest frame {} ms, {} frames over 25 ms",
-+                        sFrames * 1000.0 / (now - sFpsStart), sWorst, sHitches);
++            SPDLOG_INFO("[OoTCraft] Zelda drawing {:.0f} FPS, slowest frame {} ms, {} frames over 25 ms; frames with a "
++                        "game tick {:.1f} ms, others {:.1f} ms",
++                        sFrames * 1000.0 / (now - sFpsStart), sWorst, sHitches,
++                        sTickFrames ? sTickUs / 1000.0 / sTickFrames : 0.0,
++                        sFrames > sTickFrames + 1 ? sDrawUs / 1000.0 / (sFrames - sTickFrames - 1) : 0.0);
 +            sFrames = 0;
++            sTickFrames = 0;
++            sTickUs = 0;
++            sDrawUs = 0;
 +            sHitches = 0;
 +            sWorst = 0;
 +            sFpsStart = now;
@@ -4767,11 +5119,11 @@ index 0000000..eb7d086
 +}
 diff --git a/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
 new file mode 100644
-index 0000000..d360e06
+index 0000000..fc95f6a
 --- /dev/null
 +++ b/soh/soh/Enhancements/Minecraft/MinecraftTerrain.cpp
-@@ -0,0 +1,1385 @@
-+#include "Minecraft.h"
+@@ -0,0 +1,1397 @@
++﻿#include "Minecraft.h"
 +#include "Bridge.h"
 +
 +#include <algorithm>
@@ -5502,8 +5854,7 @@ index 0000000..d360e06
 +            continue;
 +        }
 +        if (pieces.empty() && Area2(Poly{ t[0], t[1], t[2] }) > 4 * B * B) {
-+            bigRemoved++; // a big triangle can't fit inside dug blocks: don't lose it
-+            continue;
++            bigRemoved++; // a big triangle entirely inside dug blocks (a wide pit or tunnel): it's gone too
 +        }
 +        sOrigFlags.emplace(p, p->flags_vIA);
 +        p->flags_vIA |= kIgnoreAll;
@@ -5602,7 +5953,7 @@ index 0000000..d360e06
 +    if (full) {
 +        SPDLOG_INFO("[OoTCraft] dug ground: {} level triangles cut into {} pieces in {} areas{}", sDisabled.size(),
 +                    sPieces.size(), byArea.size(),
-+                    bigRemoved ? fmt::format(" ({} kept: cut away entirely?)", bigRemoved) : "");
++                    bigRemoved ? fmt::format(" ({} big ones dug away entirely)", bigRemoved) : "");
 +    }
 +}
 +
@@ -6088,6 +6439,19 @@ index 0000000..d360e06
 +}
 +
 +// Clipped replacements for the level triangles that cross dug blocks (Minecraft's copy of Hyrule's collision)
++void AppendDugCells(int scene, std::vector<int32_t>& out) {
++    LoadConverted();
++    auto it = sConverted.find(scene);
++    if (it == sConverted.end()) {
++        return;
++    }
++    for (const CellKey& c : it->second) {
++        out.push_back(std::get<0>(c));
++        out.push_back(std::get<1>(c));
++        out.push_back(std::get<2>(c));
++    }
++}
++
 +void AppendTerrainPieces(std::vector<TerrainPiece>& out) {
 +    for (const Piece& pc : sPieces) {
 +        TerrainPiece t;
@@ -6173,23 +6537,38 @@ index 3d560bc..e26507f 100644
      Mouse_UpdatePos();
      Mouse_UpdatePosRel();
 diff --git a/soh/soh/OTRGlobals.cpp b/soh/soh/OTRGlobals.cpp
-index 39f04dd..0185d4f 100644
+index 39f04dd..e38942c 100644
 --- a/soh/soh/OTRGlobals.cpp
 +++ b/soh/soh/OTRGlobals.cpp
-@@ -1701,6 +1701,8 @@ extern "C" void Graph_StartFrame() {
+@@ -1,4 +1,4 @@
+-#include "OTRGlobals.h"
++﻿#include "OTRGlobals.h"
+ #include "OTRAudio.h"
+ #include <algorithm>
+ #include <atomic>
+@@ -1701,6 +1701,9 @@ extern "C" void Graph_StartFrame() {
  #endif
  }
  
 +bool Minecraft_LiveView(MtxF* out, Mtx** key);
++extern "C" s32 Minecraft_IsEnabled(void);
 +
  void RunCommands(Gfx* Commands, const std::vector<std::unordered_map<Mtx*, MtxF>>& mtx_replacements) {
      auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(OTRGlobals::Instance->context->GetWindow());
  
-@@ -1718,7 +1720,17 @@ void RunCommands(Gfx* Commands, const std::vector<std::unordered_map<Mtx*, MtxF>
+@@ -1717,8 +1720,25 @@ void RunCommands(Gfx* Commands, const std::vector<std::unordered_map<Mtx*, MtxF>
+     UIWidgets::Colors themeColor =
          static_cast<UIWidgets::Colors>(CVarGetInteger(CVAR_SETTING("Menu.Theme"), UIWidgets::Colors::LightBlue));
      ImGui::PushStyleColor(ImGuiCol_TitleBgActive, UIWidgets::ColorValues.at(themeColor));
++    bool firstFrame = true;
      for (const auto& m : mtx_replacements) {
 -        wnd->DrawAndRunGraphicsCommands(Commands, m);
++        // OoTCraft: take the mouse in every drawn frame, not only once per 20 Hz game tick. Otherwise its movement
++        // arrives in 50 ms bursts and looking around stutters however high the frame rate is.
++        if (!firstFrame && Minecraft_IsEnabled()) {
++            wnd->HandleEvents();
++        }
++        firstFrame = false;
 +        // OoTCraft: in Minecraft's first person every drawn frame looks through Minecraft's latest camera, not the
 +        // 20 Hz game camera blended between ticks
 +        Mtx* liveKey = nullptr;
@@ -6254,7 +6633,7 @@ index 4cf7305..b1fec17 100644
  
 diff --git a/soh/soh/SohGui/SohMenuOoTCraft.cpp b/soh/soh/SohGui/SohMenuOoTCraft.cpp
 new file mode 100644
-index 0000000..c96aa99
+index 0000000..e5fc365
 --- /dev/null
 +++ b/soh/soh/SohGui/SohMenuOoTCraft.cpp
 @@ -0,0 +1,92 @@
@@ -6293,7 +6672,7 @@ index 0000000..c96aa99
 +    AddWidget(path,
 +              "Minecraft mode: WASD / mouse / Space move, look and jump. Left click mines and attacks (Hyrule's ground "
 +              "too). Right click places, uses items, or talks on a Speak / Open / Check prompt. R = Zelda's A button. "
-+              "E = Minecraft inventory. Enter = Zelda pause menu.\n\n"
++              "E = Minecraft inventory; Tab closes it (and crafting tables, chests...). Enter = Zelda pause menu.\n\n"
 +              "F5 or G = Link (third person, Zelda's controls): Space = A, left click = B, right click / Shift = R, "
 +              "Q = Z, 1 2 3 = C-buttons, F = C-up. Houses and shops switch to Link automatically.",
 +              WIDGET_TEXT);

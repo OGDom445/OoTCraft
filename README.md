@@ -43,6 +43,7 @@ OoTCraft runs **Minecraft: Java Edition 1.21** and **[Ship of Harkinian](https:/
 |---|---|
 | ⛏️ **Dig into Hyrule** | Mine Zelda's ground block by block. Below the surface is a **real Minecraft 1.21 world**: dirt, stone, deepslate, every ore, caves, aquifers, dungeons, mineshafts, geodes, trial chambers and ancient cities, down to bedrock. |
 | 🏗️ **Build anywhere** | Place any Minecraft block in Hyrule with its real textures and 3D model (any resource pack). Link can stand on it, and hookshot to wood. |
+| 🪵 **Drops you can see** | Items you throw (Q), mobs drop or blocks spill lie on Hyrule's ground, spinning like in Minecraft, until you pick them up. |
 | 🔥 **TNT and fire** | Blow craters into Hyrule, or light fires on Zelda's grass. |
 | ⚔️ **Fight like Steve** | Minecraft weapons hit Zelda's enemies as real Zelda attacks, and Zelda's damage hurts Steve. |
 | 🎒 **Zelda items in your hotbar** | Bombs, hookshot and everything else Link owns show up as Minecraft items. |
@@ -117,6 +118,7 @@ Linux and macOS support is new: please tell us how it goes on the [Discord](http
 | 1 2 3 · F | Hotbar | C-left, C-down, C-right · C-up |
 | Q | | Z (target) |
 | E | Minecraft inventory | |
+| Tab | Close a Minecraft menu (inventory, crafting table, chest) | |
 | Enter | Zelda pause menu | Zelda pause menu |
 | F5 or G | Switch to Link | Switch back to Steve |
 | Esc | Closes a Minecraft menu (inventory, crafting table, chest). Otherwise the Ship of Harkinian menu: the **OoTCraft** tab has the settings, creative mode, world reset and Discord | same |
